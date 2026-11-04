@@ -1,0 +1,25 @@
+{
+  "source_commit": "054c87fddc0b2f5dfcadddf363c2585785a2cc5d",
+  "crate": {
+    "file": "rail-craft-0.3.0.crate",
+    "sha256": "f4a705807886d81abf360dbab3386a2d9c94152044c678ff4e260a814a023f35",
+    "command": "cargo package --locked",
+    "verification": "passed (packaged crate compiled by cargo package)",
+    "files": 54
+  },
+  "sdist": {
+    "file": "rail_craft-0.3.0.tar.gz",
+    "sha256": "d8c9c5ea36d9a4d391c72d4b2fcb95915fc1eacb40687c6d48d96e1e5f2c8a88",
+    "command": "maturin sdist (maturin 1.9.6)",
+    "files": 53
+  },
+  "wheel": {
+    "file": "rail_craft-0.3.0-cp310-abi3-manylinux_2_34_x86_64.whl",
+    "sha256": "0abb362aa53914aeee46039de450b300f76d7d43395fa927b6c5311fbc659e47",
+    "command": "maturin build --release --locked inside the extracted sdist",
+    "native_extension_sha256": "bc3f19978b2813d38f377fd5a8bd1ef7dc1beee229cd6023e8f6e4b9a039c3de",
+    "abi": "CPython 3.10+ stable ABI, Linux x86-64 (manylinux_2_34)",
+    "installed_and_tested_with": "CPython 3.12.3 in a fresh virtual environment"
+  },
+  "release_candidate": "A release-candidate wheel built the same way from commit 7ebf469 plus the version bump produced the top-level evidence files and the Python optimization timings. Its files are identical in content to the final wheel, including the native extension (same SHA-256); only archive metadata differs."
+}
