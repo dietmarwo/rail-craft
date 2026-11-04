@@ -152,8 +152,8 @@ and train dynamics are outside the supported input.
 
 The local campaign hashes the installed extension bytes plus each scenario, model,
 candidate and work settings to locate reusable records. SQLite stores completed, invalid
-and infeasible results, and keeps an append-only journal of attempts. Cancelled or
-time-limited attempts remain in the journal and can be retried. SQLite commits each chunk
+and infeasible results, and keeps an append-only journal of attempts. Work-limited,
+time-limited and canceled attempts remain only in the journal and are retried. SQLite commits each chunk
 atomically. A new extension build changes the cache namespace. The current workflow is
 local and exposes no distributed worker protocol.
 

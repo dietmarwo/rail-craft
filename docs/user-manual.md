@@ -737,7 +737,7 @@ Malformed batches are rejected as a whole:
 
 ```python
 for bad in ([{"id": "a", "parameters": [1, 0]}, {"id": "a", "parameters": [0, 1]}],
-            [{"id": "x", "parameters": [1, 0], "colour": "red"}]):
+            [{"id": "x", "parameters": [1, 0], "color": "red"}]):
     try:
         prepared.batch(bad)
     except ValueError as error:
@@ -754,7 +754,7 @@ except ValueError as error:
 
 ```text
 ValueError: invalid or duplicate candidate id, or parameter vector exceeds limit
-ValueError: unknown field `colour`, expected one of `id`, `parameters`, `trace` at line 1 column 10
+ValueError: unknown field `color`, expected one of `id`, `parameters`, `trace` at line 1 column 9
 ValueError: invalid budget or batch size
 ValueError: ragged parameter rows
 ```
@@ -935,8 +935,8 @@ long closure fifo complete 79.0
 Each returned row has `scenario`, `key`, `build_sha256`, `model_sha256` and the full
 `record`. The cache key hashes the native extension file, the scenario ID, the model, the
 candidate and the budget without `cancel_file`. Complete, invalid and infeasible results
-are cached; cancelled and time-limited attempts stay in the `attempts` journal and are
-retried. A different wheel build uses a new cache namespace. The command-line driver
+are cached; records with any other status (`work_limit`, `wall_limit` or `cancelled`)
+stay only in the `attempts` journal and are evaluated again by the next run. A different wheel build uses a new cache namespace. The command-line driver
 `validation/run_campaign.py MODULE MANIFEST DATABASE` runs a manifest such as
 `models/campaign.json` with four workers.
 
