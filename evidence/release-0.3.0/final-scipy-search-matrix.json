@@ -1,0 +1,1 @@
+{"mode": "matrix", "total_seconds": 0.0031491050003751297, "prepare_seconds": 0.00010657700022420613, "search_seconds": 0.002981716999784112, "replay_seconds": 6.081100036681164e-05, "evaluations": 16, "failures": 0, "best": [0.9178665376954516, 0.004332725510795259], "score": 17.0}

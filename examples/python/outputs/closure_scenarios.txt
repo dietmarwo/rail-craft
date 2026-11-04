@@ -1,0 +1,41 @@
+scenario     policy     weighted  max   mean  regret
+no closure   fifo            921   49  22.75     308
+no closure   priority        628   53  22.94      15
+no closure   balanced        664   49  22.88      51
+no closure   tuned           613   53  22.94       0
+closure 10   fifo           1119   55  27.62     323
+closure 10   priority        811   59  27.75      15
+closure 10   balanced        862   55  27.75      66
+closure 10   tuned           796   59  27.75       0
+closure 20   fifo           1449   65  35.75     333
+closure 20   priority       1131   69  35.88      15
+closure 20   balanced       1192   65  35.88      76
+closure 20   tuned          1116   69  35.88       0
+closure 30   fifo           1779   75  43.88     343
+closure 30   priority       1451   79  44.00      15
+closure 30   balanced       1522   75  44.00      86
+closure 30   tuned          1436   79  44.00       0
+slow block   fifo           1226   64  30.25     380
+slow block   priority        864   67  30.31      18
+slow block   balanced        912   64  30.31      66
+slow block   tuned           846   67  30.31       0
+
+total weighted delay over all scenarios
+  tuned        4807
+  priority     4885
+  balanced     5152
+  fifo         6494
+
+central block, closure [12, 42), tuned policy ('=' service, '-' held after service)
+  E00   1-  5 | ====
+  E02   6- 10 |      ====
+  E04  11- 15 |           ====
+  E08  42- 46 |                                          ====
+  W01  47- 51 |                                               ====
+  W05  52- 56 |                                                    ====
+  W11  57- 61 |                                                         ====
+  E14  62- 66 |                                                              ====
+  E10  67- 71 |                                                                   ====
+  W07  72- 76 |                                                                        ====
+
+horizon 60: status infeasible, detail horizon, completed 11 of 16 by tick 60, 3 trains still holding a resource

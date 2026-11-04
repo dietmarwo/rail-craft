@@ -1,0 +1,236 @@
+From 170c329a4c2ab0ec949c98e3221daf75777bc651 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Wed, 4 Nov 2026 02:51:37 +0100
+Subject: [PATCH 08/12] Add a lean objective path with full feasibility checks
+
+---
+ examples/performance.rs       | 12 +++++-
+ python/rail_craft/__init__.py |  4 ++
+ src/domain.rs                 |  6 ++-
+ src/lib.rs                    | 78 ++++++++++++++++++++++++++++++++---
+ 4 files changed, 91 insertions(+), 9 deletions(-)
+
+diff --git a/examples/performance.rs b/examples/performance.rs
+index 67f39d9..930cf2f 100644
+--- a/examples/performance.rs
++++ b/examples/performance.rs
+@@ -47,7 +47,15 @@ fn main() {
+     let candidates = serde_json::to_string(&candidates).unwrap();
+     let budget = json!({"workers":workers}).to_string();
+     let evaluator = Prepared::new(&model.to_string()).unwrap();
+-    let first = evaluator.evaluate_json(&candidates, &budget).unwrap();
++    let lean = std::env::var_os("CRAFT_SCORES").is_some();
++    let evaluate = || {
++        if lean {
++            evaluator.scores_json(&candidates, &budget)
++        } else {
++            evaluator.evaluate_json(&candidates, &budget)
++        }
++    };
++    let first = evaluate().unwrap();
+     if args.next().as_deref() == Some("probe") {
+         println!("{first}");
+         return;
+@@ -55,7 +63,7 @@ fn main() {
+     black_box(first);
+     let start = Instant::now();
+     for _ in 0..repeats {
+-        black_box(evaluator.evaluate_json(&candidates, &budget).unwrap());
++        black_box(evaluate().unwrap());
+     }
+     println!("{}", start.elapsed().as_secs_f64() / f64::from(repeats));
+ }
+diff --git a/python/rail_craft/__init__.py b/python/rail_craft/__init__.py
+index 9ef8e42..a154ddf 100644
+--- a/python/rail_craft/__init__.py
++++ b/python/rail_craft/__init__.py
+@@ -17,6 +17,10 @@ class Prepared:
+     def batch(self, candidates, **budget):
+         return json.loads(self._native.batch(_encode(candidates), _encode(budget)))
+ 
++    def scores(self, candidates, **budget):
++        """Return ordered objectives and statuses for untraced candidates."""
++        return json.loads(self._native.scores(_encode(candidates), _encode(budget)))
++
+     def evaluate(self, parameters, *, trace=False, **budget):
+         return self.batch([{"id": "one", "parameters": parameters, "trace": trace}], **budget)[
+             "records"
+diff --git a/src/domain.rs b/src/domain.rs
+index f6804fc..a892450 100644
+--- a/src/domain.rs
++++ b/src/domain.rs
+@@ -273,8 +273,10 @@ pub fn evaluate(model: &Model, candidate: &Candidate, work: &mut Work<'_>) -> Ev
+         .sum();
+     Ok((
+         score,
+-        json!({"completed":completed,"max_delay":delay.iter().max(),"delays":delay,
+-        "intervals":candidate.trace.then_some(intervals)}),
++        work.metrics(|| {
++            json!({"completed":completed,"max_delay":delay.iter().max(),"delays":delay,
++        "intervals":candidate.trace.then_some(intervals)})
++        }),
+     ))
+ }
+ 
+diff --git a/src/lib.rs b/src/lib.rs
+index 7de9ead..1425ac7 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -77,8 +77,17 @@ pub struct Work<'a> {
+     deadline: Option<Instant>,
+     used: u64,
+     monitored: bool,
++    metrics_enabled: bool,
+ }
+ impl Work<'_> {
++    pub fn metrics(&self, make: impl FnOnce() -> Value) -> Value {
++        if self.metrics_enabled {
++            make()
++        } else {
++            Value::Null
++        }
++    }
++
+     #[inline]
+     pub fn step(&mut self) -> Result<(), Failure> {
+         if self.used < self.budget.max_steps && !self.monitored {
+@@ -152,7 +161,28 @@ impl Prepared {
+         let candidates: Vec<Candidate> =
+             serde_json::from_str(candidates).map_err(|e| e.to_string())?;
+         let budget = serde_json::from_str(budget).map_err(|e| e.to_string())?;
+-        serde_json::to_string(&self.evaluate(&candidates, budget)?).map_err(|e| e.to_string())
++        self.evaluate_encoded(candidates, budget, true)
++    }
++
++    /// Evaluate untraced candidates with full feasibility checks and null metrics.
++    pub fn scores_json(&self, candidates: &str, budget: &str) -> Result<String, String> {
++        let candidates: Vec<Candidate> =
++            serde_json::from_str(candidates).map_err(|e| e.to_string())?;
++        let budget = serde_json::from_str(budget).map_err(|e| e.to_string())?;
++        if candidates.iter().any(|c| c.trace) {
++            return Err("scores mode accepts untraced candidates only".into());
++        }
++        self.evaluate_encoded(candidates, budget, false)
++    }
++
++    fn evaluate_encoded(
++        &self,
++        candidates: Vec<Candidate>,
++        budget: Budget,
++        metrics_enabled: bool,
++    ) -> Result<String, String> {
++        serde_json::to_string(&self.evaluate(&candidates, budget, metrics_enabled)?)
++            .map_err(|e| e.to_string())
+     }
+ 
+     fn record<'a>(
+@@ -160,11 +190,13 @@ impl Prepared {
+         c: &'a Candidate,
+         budget: &Budget,
+         deadline: Option<Instant>,
++        metrics_enabled: bool,
+     ) -> Record<'a> {
+         let mut work = Work {
+             budget,
+             deadline,
+             used: 0,
++            metrics_enabled,
+             monitored: deadline.is_some() || budget.cancel_file.is_some(),
+         };
+         let result = domain::evaluate(&self.model, c, &mut work);
+@@ -189,7 +221,7 @@ impl Prepared {
+                 status: e.status,
+                 steps: work.used,
+                 score: None,
+-                metrics: e.metrics,
++                metrics: if metrics_enabled { e.metrics } else { None },
+                 detail: Some(e.detail),
+             },
+         }
+@@ -199,6 +231,7 @@ impl Prepared {
+         &'a self,
+         candidates: &'a [Candidate],
+         budget: Budget,
++        metrics_enabled: bool,
+     ) -> Result<Batch<'a>, String> {
+         if !(1..=64).contains(&budget.workers)
+             || !(1..=100_000_000).contains(&budget.max_steps)
+@@ -226,7 +259,7 @@ impl Prepared {
+         let records: Vec<_> = if budget.workers == 1 || candidates.len() == 1 {
+             candidates
+                 .iter()
+-                .map(|c| self.record(c, &budget, deadline))
++                .map(|c| self.record(c, &budget, deadline, metrics_enabled))
+                 .collect()
+         } else {
+             let next = AtomicUsize::new(0);
+@@ -239,7 +272,7 @@ impl Prepared {
+                             let Some(c) = candidates.get(index) else {
+                                 break;
+                             };
+-                            let record = self.record(c, &budget, deadline);
++                            let record = self.record(c, &budget, deadline, metrics_enabled);
+                             assert!(slots[index].set(record).is_ok(), "duplicate work index");
+                         }
+                     });
+@@ -275,7 +308,8 @@ pub fn run(text: &str) -> Result<Value, String> {
+         return Err("unsupported request schema".into());
+     }
+     let prepared = Prepared::new(req.model.get())?;
+-    serde_json::to_value(prepared.evaluate(&req.candidates, req.budget)?).map_err(|e| e.to_string())
++    serde_json::to_value(prepared.evaluate(&req.candidates, req.budget, true)?)
++        .map_err(|e| e.to_string())
+ }
+ 
+ pub fn capabilities() -> Value {
+@@ -300,6 +334,10 @@ mod python {
+                 .map(Self)
+                 .map_err(PyValueError::new_err)
+         }
++        fn scores(&self, py: Python<'_>, candidates: String, budget: String) -> PyResult<String> {
++            py.detach(|| self.0.scores_json(&candidates, &budget))
++                .map_err(PyValueError::new_err)
++        }
+         fn batch(&self, py: Python<'_>, candidates: String, budget: String) -> PyResult<String> {
+             py.detach(|| self.0.evaluate_json(&candidates, &budget))
+                 .map_err(PyValueError::new_err)
+@@ -335,6 +373,36 @@ mod tests {
+         assert_eq!(serial, parallel);
+         assert!(serial.contains(r#""status":"complete""#));
+     }
++    #[test]
++    fn scores_keep_order_status_steps_and_objective() {
++        let example = fixture();
++        let prepared = Prepared::new(&example["model"].to_string()).unwrap();
++        let mut candidates = json!([
++            {"id":"valid","parameters":example["parameters"]},
++            {"id":"invalid","parameters": vec![1.0; 63]},
++        ]);
++        for budget in ["{}", r#"{"workers":4}"#, r#"{"max_steps":1}"#] {
++            let mut full: Value = serde_json::from_str(
++                &prepared
++                    .evaluate_json(&candidates.to_string(), budget)
++                    .unwrap(),
++            )
++            .unwrap();
++            for row in full["records"].as_array_mut().unwrap() {
++                row["metrics"] = Value::Null;
++            }
++            let scores: Value = serde_json::from_str(
++                &prepared
++                    .scores_json(&candidates.to_string(), budget)
++                    .unwrap(),
++            )
++            .unwrap();
++            assert_eq!(full, scores);
++        }
++        candidates[0]["trace"] = json!(true);
++        assert!(prepared.scores_json(&candidates.to_string(), "{}").is_err());
++    }
++
+     #[test]
+     fn model_and_candidate_validation_are_independent() {
+         let mut example = fixture();
+-- 
+2.51.1
+

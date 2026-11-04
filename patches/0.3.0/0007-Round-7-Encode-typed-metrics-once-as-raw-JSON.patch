@@ -1,0 +1,369 @@
+From a68b375172b0da71d2c4a61c6585f4512468b7fa Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 11:48:57 -0400
+Subject: [PATCH 07/15] Round 7: Encode typed metrics once as raw JSON
+
+Build complete, stop and unfinished metrics from typed structs whose
+fields follow the sorted key order of the former Value maps, encode
+them once into a Box<RawValue> and splice that into records. Interval
+fields are declared in the same sorted order. A test checks that every
+metrics shape re-serializes byte for byte through a sorted Value, and
+the CLI output for complete, work-limited and infeasible requests is
+unchanged.
+
+Workload: serial with full records (96 candidates, one worker), 11 samples.
+Before median: 0.117 ms. After median: 0.093 ms. Speedup: 1.26x.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ evidence/performance-0.3.0/plan.md            |  11 ++
+ .../performance-0.3.0/round07-serial.json     |  36 +++++
+ src/domain.rs                                 | 129 +++++++++++++++---
+ src/lib.rs                                    |  27 ++--
+ 4 files changed, 171 insertions(+), 32 deletions(-)
+ create mode 100644 evidence/performance-0.3.0/round07-serial.json
+
+diff --git a/evidence/performance-0.3.0/plan.md b/evidence/performance-0.3.0/plan.md
+index aea7619..dc53ced 100644
+--- a/evidence/performance-0.3.0/plan.md
++++ b/evidence/performance-0.3.0/plan.md
+@@ -90,3 +90,14 @@ save its timing under `rejected/` and try something else.
+   metrics are requested; the score keeps the same summation order.
+ - Expected effect: about 20 allocations and frees per candidate disappear; in the small
+   example they are about a third of the instructions. Expect 1.2x to 1.5x.
++
++### Round 7: typed metrics encoded once
++
++- Workload: `serial` with full records (96 candidates, one worker), round 6 against round 7.
++- Change: build metrics from typed structs whose fields are declared in the sorted key order
++  of the former `serde_json::Value` maps (the `Interval` fields are reordered the same way),
++  encode them once into a `Box<RawValue>`, and splice that raw JSON into the record. The
++  CLI still converts the batch to a `Value`, so its output keeps the same key order.
++- Expected effect: removes the `Value` tree with its string-keyed maps and per-number nodes
++  and the second serialization pass. Full `serial` is about twice the lean cost; expect
++  1.2x to 1.4x.
+diff --git a/evidence/performance-0.3.0/round07-serial.json b/evidence/performance-0.3.0/round07-serial.json
+new file mode 100644
+index 0000000..c59bf79
+--- /dev/null
++++ b/evidence/performance-0.3.0/round07-serial.json
+@@ -0,0 +1,36 @@
++{
++  "workload": "serial",
++  "before_mode": "full",
++  "after_mode": "full",
++  "before_seconds": [
++    0.00010688425,
++    0.00010851175,
++    0.00011786925,
++    0.000117187,
++    0.0001100775,
++    0.00012105075,
++    0.0001950875,
++    0.0001066835,
++    0.0001219345,
++    0.0001143165,
++    0.00013328175
++  ],
++  "after_seconds": [
++    8.653975e-05,
++    7.970125e-05,
++    8.31465e-05,
++    9.29205e-05,
++    0.000129656,
++    8.6913e-05,
++    9.587625e-05,
++    9.649775e-05,
++    0.0001121255,
++    8.722375e-05,
++    0.00011261625
++  ],
++  "medians_seconds": [
++    0.000117187,
++    9.29205e-05
++  ],
++  "speedup": 1.2611533515209237
++}
+diff --git a/src/domain.rs b/src/domain.rs
+index f4ad284..e8166ad 100644
+--- a/src/domain.rs
++++ b/src/domain.rs
+@@ -59,15 +59,43 @@ struct Closure {
+     end: u64,
+ }
+ 
++/// One movement. Fields are declared in sorted key order, so typed serialization
++/// emits the same bytes as the sorted `serde_json::Value` maps used before 0.3.0.
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ #[serde(deny_unknown_fields)]
+ pub struct Interval {
+-    train: usize,
++    entry: u64,
++    exit: u64,
+     leg: usize,
+     resource: usize,
+-    entry: u64,
+     service_end: u64,
+-    exit: u64,
++    train: usize,
++}
++
++/// Metrics of a complete schedule, in sorted key order.
++#[derive(Serialize)]
++struct CompleteMetrics<'a> {
++    completed: usize,
++    delays: &'a [u64],
++    intervals: Option<&'a [Interval]>,
++    max_delay: Option<&'a u64>,
++}
++
++/// Metrics at a work, deadline or cancellation stop, in sorted key order.
++#[derive(Serialize)]
++struct StopMetrics<'a> {
++    closed_intervals: Option<&'a [Interval]>,
++    completed: usize,
++    time: u64,
++}
++
++/// Metrics of an unfinished schedule, in sorted key order.
++#[derive(Serialize)]
++struct UnfinishedMetrics<'a> {
++    active: Option<Vec<&'a Interval>>,
++    closed_intervals: Option<&'a [Interval]>,
++    completed: usize,
++    time: u64,
+ }
+ 
+ /// Event kinds in processing order at one tick.
+@@ -301,9 +329,11 @@ pub fn evaluate(
+                 break;
+             }
+             if let Err(e) = work.step() {
+-                return Err(e.with_metrics(
+-                    json!({"closed_intervals": trace.then_some(&intervals), "completed":completed, "time":time}),
+-                ));
++                return Err(e.with_metrics(&StopMetrics {
++                    closed_intervals: trace.then_some(&intervals[..]),
++                    completed,
++                    time,
++                }));
+             }
+             if from_timeline {
+                 cursor += 1;
+@@ -375,9 +405,11 @@ pub fn evaluate(
+             }
+             let i = 127 - (best as usize & 127);
+             if let Err(e) = work.step() {
+-                return Err(e.with_metrics(
+-                    json!({"closed_intervals":trace.then_some(&intervals),"completed":completed,"time":time}),
+-                ));
++                return Err(e.with_metrics(&StopMetrics {
++                    closed_intervals: trace.then_some(&intervals[..]),
++                    completed,
++                    time,
++                }));
+             }
+             let state = &mut trains[i];
+             if let Some(previous) = state.held.take() {
+@@ -412,9 +444,12 @@ pub fn evaluate(
+         } else {
+             "horizon"
+         };
+-        return Err(infeasible(reason).with_metrics(
+-            json!({"completed":completed,"time":time,"closed_intervals":trace.then_some(&intervals),"active":trace.then_some(active)}),
+-        ));
++        return Err(infeasible(reason).with_metrics(&UnfinishedMetrics {
++            active: trace.then_some(active),
++            closed_intervals: trace.then_some(&intervals[..]),
++            completed,
++            time,
++        }));
+     }
+     validate_with(model, intervals, verify).map_err(invalid)?;
+     let delay =
+@@ -428,9 +463,14 @@ pub fn evaluate(
+     Ok((
+         score,
+         work.metrics(|| {
+-            let delay: Vec<_> = trains.iter().zip(&model.trains).map(delay).collect();
+-            json!({"completed":completed,"max_delay":delay.iter().max(),"delays":delay,
+-        "intervals":trace.then_some(&*intervals)})
++            let delays: Vec<_> = trains.iter().zip(&model.trains).map(delay).collect();
++            let metrics = CompleteMetrics {
++                completed,
++                delays: &delays,
++                intervals: trace.then_some(&intervals[..]),
++                max_delay: delays.iter().max(),
++            };
++            crate::encode_metrics(&metrics)
+         }),
+     ))
+ }
+@@ -602,7 +642,7 @@ mod tests {
+             while events.peek().is_some_and(|Reverse((t, _, _))| *t == at) {
+                 if let Err(e) = work.step() {
+                     return Err(e.with_metrics(
+-                        json!({"closed_intervals": trace.then_some(&intervals), "completed":completed, "time":time}),
++                        &json!({"closed_intervals": trace.then_some(&intervals), "completed":completed, "time":time}),
+                     ));
+                 }
+                 let Reverse((_, kind, i)) = events.pop().expect("peeked event");
+@@ -661,7 +701,7 @@ mod tests {
+                 let Some((i, _, _)) = best else { break };
+                 if let Err(e) = work.step() {
+                     return Err(e.with_metrics(
+-                        json!({"closed_intervals":trace.then_some(&intervals),"completed":completed,"time":time}),
++                        &json!({"closed_intervals":trace.then_some(&intervals),"completed":completed,"time":time}),
+                     ));
+                 }
+                 let state = &mut trains[i];
+@@ -695,7 +735,7 @@ mod tests {
+                 "horizon"
+             };
+             return Err(infeasible(reason).with_metrics(
+-                json!({"completed":completed,"time":time,"closed_intervals":trace.then_some(&intervals),"active":trace.then_some(active)}),
++                &json!({"completed":completed,"time":time,"closed_intervals":trace.then_some(&intervals),"active":trace.then_some(active)}),
+             ));
+         }
+         reference_validate(model, &intervals).map_err(invalid)?;
+@@ -712,8 +752,10 @@ mod tests {
+         Ok((
+             score,
+             work.metrics(|| {
+-                json!({"completed":completed,"max_delay":delay.iter().max(),"delays":delay,
+-            "intervals":trace.then_some(intervals)})
++                crate::encode_metrics(
++                    &json!({"completed":completed,"max_delay":delay.iter().max(),"delays":delay,
++            "intervals":trace.then_some(intervals)}),
++                )
+             }),
+         ))
+     }
+@@ -966,6 +1008,53 @@ mod tests {
+         assert_eq!(verdicts.len(), 6, "{verdicts:?}");
+     }
+ 
++    #[test]
++    fn typed_metrics_keep_sorted_value_bytes() {
++        let mut shapes = std::collections::BTreeSet::new();
++        let mut scratch = Scratch::default();
++        for seed in 0..200 {
++            let text = random_model(seed).to_string();
++            let Ok(model) = prepare(serde_json::from_str(&text).unwrap()) else {
++                continue;
++            };
++            for trace in [false, true] {
++                for max_steps in [1_000_000, 1 + seed % 30] {
++                    let budget = Budget {
++                        max_steps,
++                        ..Budget::default()
++                    };
++                    let mut work = Work {
++                        budget: &budget,
++                        deadline: None,
++                        used: 0,
++                        monitored: false,
++                        metrics_enabled: true,
++                    };
++                    let metrics =
++                        match evaluate(&model, &[1.0, 0.25], trace, &mut work, &mut scratch) {
++                            Ok((_, metrics)) => metrics,
++                            Err(e) => e.metrics,
++                        }
++                        .expect("metrics enabled");
++                    let resorted = serde_json::to_string(
++                        &serde_json::from_str::<Value>(metrics.get()).unwrap(),
++                    )
++                    .unwrap();
++                    assert_eq!(metrics.get(), resorted, "seed {seed}");
++                    let keys: Vec<_> = serde_json::from_str::<Value>(metrics.get())
++                        .unwrap()
++                        .as_object()
++                        .unwrap()
++                        .keys()
++                        .cloned()
++                        .collect();
++                    shapes.insert((keys.join(","), trace));
++                }
++            }
++        }
++        assert_eq!(shapes.len(), 6, "{shapes:?}");
++    }
++
+     #[test]
+     fn evaluate_matches_the_reference_dispatcher() {
+         let weights = [
+diff --git a/src/lib.rs b/src/lib.rs
+index e06adaf..4c7b927 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -14,13 +14,19 @@ use std::{
+     time::{Duration, Instant},
+ };
+ 
+-pub type Evaluation = Result<(f64, Value), Failure>;
++/// A score with optional pre-encoded metrics, or a classified failure.
++pub type Evaluation = Result<(f64, Option<Box<RawValue>>), Failure>;
+ 
+ #[derive(Debug, Clone)]
+ pub struct Failure {
+     status: &'static str,
+     detail: String,
+-    metrics: Option<Value>,
++    metrics: Option<Box<RawValue>>,
++}
++
++/// Encode metrics once; the raw JSON is spliced into records without a `Value` tree.
++pub fn encode_metrics(metrics: &impl Serialize) -> Box<RawValue> {
++    serde_json::value::to_raw_value(metrics).expect("metrics encode as JSON")
+ }
+ pub fn invalid(detail: impl Into<String>) -> Failure {
+     Failure {
+@@ -38,8 +44,8 @@ pub fn infeasible(detail: impl Into<String>) -> Failure {
+ }
+ 
+ impl Failure {
+-    pub fn with_metrics(mut self, metrics: Value) -> Self {
+-        self.metrics = Some(metrics);
++    pub fn with_metrics(mut self, metrics: &impl Serialize) -> Self {
++        self.metrics = Some(encode_metrics(metrics));
+         self
+     }
+ }
+@@ -139,12 +145,9 @@ pub struct Work<'a> {
+     metrics_enabled: bool,
+ }
+ impl Work<'_> {
+-    pub fn metrics(&self, make: impl FnOnce() -> Value) -> Value {
+-        if self.metrics_enabled {
+-            make()
+-        } else {
+-            Value::Null
+-        }
++    /// Build metrics only when the caller requested full records.
++    pub fn metrics(&self, make: impl FnOnce() -> Box<RawValue>) -> Option<Box<RawValue>> {
++        self.metrics_enabled.then(make)
+     }
+ 
+     #[inline]
+@@ -190,7 +193,7 @@ struct Record<'a> {
+     status: &'static str,
+     steps: u64,
+     score: Option<f64>,
+-    metrics: Option<Value>,
++    metrics: Option<Box<RawValue>>,
+     detail: Option<String>,
+ }
+ 
+@@ -341,7 +344,7 @@ impl Prepared {
+                 status: "complete",
+                 steps,
+                 score: Some(score),
+-                metrics: Some(metrics),
++                metrics,
+                 detail: None,
+             },
+             Err(e) => Record {
+-- 
+2.43.0
+

@@ -1,0 +1,11 @@
+differential evolution: weighted delay 1005 at [7.808, 0.491]
+  21 generations, 22 native calls scored 528 rows, 0 penalized; Optimization terminated successfully.
+61 x 61 grid search:    weighted delay 1005 at [2.6666666666666665, 0.16666666666666666]
+
+held-out closure [40, 52)
+  DE result     [ 7.808,  0.491] -> 756
+  grid best     [ 2.667,  0.167] -> 756
+  FIFO          [ 0.000,  1.000] -> 1152
+  priority only [ 1.000,  0.000] -> 782
+
+traced replay agrees: score 1005, steps 161, max delay 67

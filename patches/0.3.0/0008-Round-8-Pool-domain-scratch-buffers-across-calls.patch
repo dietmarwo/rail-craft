@@ -1,0 +1,321 @@
+From eb30c8dce6e9a7ad07335a3f645f9b8298f95bb8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 11:50:52 -0400
+Subject: [PATCH 08/15] Round 8: Pool domain scratch buffers across calls
+
+Prepared keeps a mutex-protected pool of at most 64 scratch sets. The
+inline caller and each worker take one per batch and return it, so
+consecutive single-candidate calls reuse warm buffers. A test compares
+pooled results with fresh evaluators across models, budgets, worker
+counts and traced records, and checks the pool limit.
+
+Workload: one in matrix mode (one candidate per call), 11 samples.
+Before median: 0.731 us. After median: 0.496 us. Speedup: 1.47x.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ evidence/performance-0.3.0/plan.md            |  11 ++
+ .../performance-0.3.0/round08-matrix-one.json |  36 ++++
+ src/lib.rs                                    | 162 ++++++++++++++----
+ 3 files changed, 179 insertions(+), 30 deletions(-)
+ create mode 100644 evidence/performance-0.3.0/round08-matrix-one.json
+
+diff --git a/evidence/performance-0.3.0/plan.md b/evidence/performance-0.3.0/plan.md
+index dc53ced..2c9d6ad 100644
+--- a/evidence/performance-0.3.0/plan.md
++++ b/evidence/performance-0.3.0/plan.md
+@@ -101,3 +101,14 @@ save its timing under `rejected/` and try something else.
+ - Expected effect: removes the `Value` tree with its string-keyed maps and per-number nodes
+   and the second serialization pass. Full `serial` is about twice the lean cost; expect
+   1.2x to 1.4x.
++
++### Round 8: scratch pool across calls
++
++- Workload: `one` in matrix mode (`--before-matrix --after-matrix`, one candidate per call,
++  40 calls), round 7 against round 8.
++- Change: `Prepared` keeps a mutex-protected pool of at most 64 `domain::Scratch` sets. The
++  inline caller and each worker take one at the start of a batch and return it at the end,
++  so consecutive single-candidate calls, as issued by optimizers, reuse warm buffers instead
++  of allocating about a dozen vectors per call.
++- Expected effect: removes most allocations of a single-row call (about a quarter of its
++  instructions). Expect 1.1x to 1.3x.
+diff --git a/evidence/performance-0.3.0/round08-matrix-one.json b/evidence/performance-0.3.0/round08-matrix-one.json
+new file mode 100644
+index 0000000..f0431c6
+--- /dev/null
++++ b/evidence/performance-0.3.0/round08-matrix-one.json
+@@ -0,0 +1,36 @@
++{
++  "workload": "one",
++  "before_mode": "matrix",
++  "after_mode": "matrix",
++  "before_seconds": [
++    7.03625e-07,
++    8.263e-07,
++    7.53e-07,
++    6.75825e-07,
++    5.788000000000001e-07,
++    7.04575e-07,
++    7.1585e-07,
++    1.01765e-06,
++    7.3075e-07,
++    7.360250000000001e-07,
++    7.42875e-07
++  ],
++  "after_seconds": [
++    5.11075e-07,
++    7.04675e-07,
++    4.940000000000001e-07,
++    4.873749999999999e-07,
++    3.84225e-07,
++    5.19875e-07,
++    4.95625e-07,
++    4.921999999999999e-07,
++    4.87225e-07,
++    5.40525e-07,
++    5.78275e-07
++  ],
++  "medians_seconds": [
++    7.3075e-07,
++    4.95625e-07
++  ],
++  "speedup": 1.4744010088272381
++}
+diff --git a/src/lib.rs b/src/lib.rs
+index 4c7b927..3eb7751 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -8,7 +8,7 @@ use std::{
+     collections::HashSet,
+     path::PathBuf,
+     sync::{
+-        OnceLock,
++        Mutex, OnceLock, PoisonError,
+         atomic::{AtomicUsize, Ordering},
+     },
+     time::{Duration, Instant},
+@@ -101,23 +101,55 @@ pub struct MatrixScore {
+     pub score: Option<f64>,
+ }
+ 
++/// Reusable domain buffers shared by the calls of one `Prepared` evaluator.
++#[derive(Default)]
++struct ScratchPool(Mutex<Vec<domain::Scratch>>);
++
++impl ScratchPool {
++    /// Most scratch sets retained between calls; more concurrent users allocate their own.
++    const LIMIT: usize = 64;
++
++    fn take(&self) -> domain::Scratch {
++        self.0
++            .lock()
++            .unwrap_or_else(PoisonError::into_inner)
++            .pop()
++            .unwrap_or_default()
++    }
++
++    fn give(&self, scratch: domain::Scratch) {
++        let mut pool = self.0.lock().unwrap_or_else(PoisonError::into_inner);
++        if pool.len() < Self::LIMIT {
++            pool.push(scratch);
++        }
++    }
++
++    #[cfg(test)]
++    fn len(&self) -> usize {
++        self.0.lock().unwrap_or_else(PoisonError::into_inner).len()
++    }
++}
++
+ /// Evaluate `count` independent items inline or on scoped workers, in input order.
+-/// The inline caller and each worker reuse one domain scratch for all of their items.
++/// The inline caller and each worker reuse one pooled domain scratch for all items.
+ fn dispatch<T: Send + Sync>(
++    pool: &ScratchPool,
+     count: usize,
+     workers: usize,
+     evaluate: impl Fn(&mut domain::Scratch, usize) -> T + Sync,
+ ) -> Vec<T> {
+     if workers == 1 || count == 1 {
+-        let mut scratch = domain::Scratch::default();
+-        return (0..count).map(|i| evaluate(&mut scratch, i)).collect();
++        let mut scratch = pool.take();
++        let rows = (0..count).map(|i| evaluate(&mut scratch, i)).collect();
++        pool.give(scratch);
++        return rows;
+     }
+     let next = AtomicUsize::new(0);
+     let slots: Vec<_> = (0..count).map(|_| OnceLock::new()).collect();
+     std::thread::scope(|scope| {
+         for _ in 0..workers.min(count) {
+             scope.spawn(|| {
+-                let mut scratch = domain::Scratch::default();
++                let mut scratch = pool.take();
+                 loop {
+                     let index = next.fetch_add(1, Ordering::Relaxed);
+                     if index >= count {
+@@ -128,6 +160,7 @@ fn dispatch<T: Send + Sync>(
+                         "duplicate work index"
+                     );
+                 }
++                pool.give(scratch);
+             });
+         }
+     });
+@@ -208,6 +241,7 @@ struct Batch<'a> {
+ pub struct Prepared {
+     model: domain::Model,
+     model_sha256: String,
++    scratch: ScratchPool,
+ }
+ impl Prepared {
+     pub fn new(model: &str) -> Result<Self, String> {
+@@ -216,6 +250,7 @@ impl Prepared {
+         Ok(Self {
+             model,
+             model_sha256,
++            scratch: ScratchPool::default(),
+         })
+     }
+ 
+@@ -277,22 +312,28 @@ impl Prepared {
+             return Err("invalid budget or batch size".into());
+         }
+         let deadline = budget.deadline();
+-        Ok(dispatch(rows, budget.workers, |scratch, row| {
+-            let values = &parameters[row * dimension..(row + 1) * dimension];
+-            let (result, steps) = self.outcome(scratch, values, false, &budget, deadline, false);
+-            match result {
+-                Ok((score, _)) => MatrixScore {
+-                    status: "complete",
+-                    steps,
+-                    score: Some(score),
+-                },
+-                Err(e) => MatrixScore {
+-                    status: e.status,
+-                    steps,
+-                    score: None,
+-                },
+-            }
+-        }))
++        Ok(dispatch(
++            &self.scratch,
++            rows,
++            budget.workers,
++            |scratch, row| {
++                let values = &parameters[row * dimension..(row + 1) * dimension];
++                let (result, steps) =
++                    self.outcome(scratch, values, false, &budget, deadline, false);
++                match result {
++                    Ok((score, _)) => MatrixScore {
++                        status: "complete",
++                        steps,
++                        score: Some(score),
++                    },
++                    Err(e) => MatrixScore {
++                        status: e.status,
++                        steps,
++                        score: None,
++                    },
++                }
++            },
++        ))
+     }
+ 
+     fn outcome(
+@@ -380,15 +421,20 @@ impl Prepared {
+             return Err("at most 16 traced candidates per batch".into());
+         }
+         let deadline = budget.deadline();
+-        let records = dispatch(candidates.len(), budget.workers, |scratch, index| {
+-            self.record(
+-                scratch,
+-                &candidates[index],
+-                &budget,
+-                deadline,
+-                metrics_enabled,
+-            )
+-        });
++        let records = dispatch(
++            &self.scratch,
++            candidates.len(),
++            budget.workers,
++            |scratch, index| {
++                self.record(
++                    scratch,
++                    &candidates[index],
++                    &budget,
++                    deadline,
++                    metrics_enabled,
++                )
++            },
++        );
+         Ok(Batch {
+             model_sha256: &self.model_sha256,
+             records,
+@@ -643,6 +689,62 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn pooled_scratch_matches_fresh_evaluators() {
++        let example = fixture();
++        let model = example["model"].to_string();
++        let mut short = example["model"].clone();
++        short["horizon"] = json!(12);
++        for train in short["trains"].as_array_mut().unwrap() {
++            train["planned"] = json!(5);
++        }
++        let short = short.to_string();
++        let shared = Prepared::new(&model).unwrap();
++        let shared_short = Prepared::new(&short).unwrap();
++        let batches: [(&[f64], &str); 6] = [
++            (&[1.0, 0.0, 0.0, 0.0, 2.0, 1.5], r#"{"workers":3}"#),
++            (&[0.5, 0.25], "{}"),
++            (&[11.0, 0.0, 1.0, 1.0], r#"{"max_steps":9}"#),
++            (
++                &[2.0, 2.0, 3.0, 0.1, 0.2, 0.3, 4.0, 5.0],
++                r#"{"workers":2}"#,
++            ),
++            (&[1.0, 0.0], r#"{"max_steps":21}"#),
++            (&[0.0, 7.0, 9.0, 0.0], "{}"),
++        ];
++        for round in 0..3 {
++            for (parameters, budget) in batches {
++                let rows = parameters.len() / 2;
++                for (text, prepared) in [(&model, &shared), (&short, &shared_short)] {
++                    let fresh = Prepared::new(text).unwrap();
++                    assert_eq!(
++                        prepared.score_matrix(rows, parameters, budget).unwrap(),
++                        fresh.score_matrix(rows, parameters, budget).unwrap(),
++                        "round {round} {budget}"
++                    );
++                    let candidates: Vec<_> = parameters
++                        .chunks(2)
++                        .enumerate()
++                        .map(
++                            |(i, p)| json!({"id": i.to_string(), "parameters": p, "trace": i == 0}),
++                        )
++                        .collect();
++                    let candidates = Value::from(candidates).to_string();
++                    assert_eq!(
++                        prepared.evaluate_json(&candidates, budget).unwrap(),
++                        fresh.evaluate_json(&candidates, budget).unwrap()
++                    );
++                }
++            }
++        }
++        assert!((1..=ScratchPool::LIMIT).contains(&shared.scratch.len()));
++        let pool = ScratchPool::default();
++        for _ in 0..ScratchPool::LIMIT + 3 {
++            pool.give(domain::Scratch::default());
++        }
++        assert_eq!(pool.len(), ScratchPool::LIMIT);
++    }
++
+     #[test]
+     fn model_and_candidate_validation_are_independent() {
+         let mut example = fixture();
+-- 
+2.43.0
+

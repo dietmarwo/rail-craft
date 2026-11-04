@@ -1,0 +1,328 @@
+From 81b6a3357a416e2dc17b3332f4bb8f1612a50eaa Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 11:42:33 -0400
+Subject: [PATCH 05/15] Round 5: Verify intervals with flat slots and a
+ counting pass
+
+Keep the verifier's three phases, checks and messages, but place each
+movement in a prepared per-train leg slot and group movements by
+resource with a stable counting pass. A group is sorted by entry only
+when it is out of order. A randomized test compares verdicts and
+messages with the 0.2.0 verifier on corrupted traces. The independent
+domain validation passed against this round's CLI.
+
+Workload: lean domain (48 candidates, 110 trains), 11 samples.
+Before median: 1.286 ms. After median: 1.072 ms. Speedup: 1.20x.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ evidence/performance-0.3.0/plan.md            |  17 ++
+ .../round05-lean-domain.json                  |  36 ++++
+ src/domain.rs                                 | 174 ++++++++++++++++--
+ 3 files changed, 212 insertions(+), 15 deletions(-)
+ create mode 100644 evidence/performance-0.3.0/round05-lean-domain.json
+
+diff --git a/evidence/performance-0.3.0/plan.md b/evidence/performance-0.3.0/plan.md
+index f8ec78c..aacda4f 100644
+--- a/evidence/performance-0.3.0/plan.md
++++ b/evidence/performance-0.3.0/plan.md
+@@ -61,3 +61,20 @@ save its timing under `rejected/` and try something else.
+   per-candidate heap clone and the logarithmic pops of 700 static events.
+ - Expected effect: heap work is about 19% of `domain2` instructions after round 3, plus the
+   clone. Expect 1.1x to 1.25x.
++
++### Round 5: flat interval verifier
++
++- Workload: lean `domain` (`--before-scores --after-scores`, 48 candidates, 110 trains),
++  round 4 against round 5.
++- Change: `validate_trace` keeps its three phases, checks and messages. Instead of one vector
++  per train and per resource, it places each movement into a prepared per-train leg slot
++  (prefix offsets computed at preparation) and groups movements by resource with a stable
++  counting pass, sorting a group by entry only when it is not already ordered. Per call it
++  allocates three buffers instead of trains + resources + 2 vectors.
++- Equivalence argument: with no repeated (train, leg) slot, the row count equals the total
++  leg count exactly when every train has all its legs, which is the per-train sort condition;
++  rows sharing a resource and entry always fail the clearance check in either order. A
++  randomized test compares accept/reject and message with the 0.2.0 verifier on corrupted
++  traces.
++- Expected effect: the verifier and its allocations are about 22% of the lean `domain`
++  instructions. Expect 1.1x to 1.2x.
+diff --git a/evidence/performance-0.3.0/round05-lean-domain.json b/evidence/performance-0.3.0/round05-lean-domain.json
+new file mode 100644
+index 0000000..b886368
+--- /dev/null
++++ b/evidence/performance-0.3.0/round05-lean-domain.json
+@@ -0,0 +1,36 @@
++{
++  "workload": "domain",
++  "before_mode": "scores",
++  "after_mode": "scores",
++  "before_seconds": [
++    0.0013371852,
++    0.0022035312,
++    0.0015320442,
++    0.0011764724000000002,
++    0.0011795904,
++    0.0012668174,
++    0.0012692546,
++    0.0014376346,
++    0.0013166938,
++    0.0012363763999999999,
++    0.0012863258000000001
++  ],
++  "after_seconds": [
++    0.0011711879999999999,
++    0.0014930488000000001,
++    0.0010467082,
++    0.0009983805999999999,
++    0.0010499938,
++    0.0010570584,
++    0.0012138744,
++    0.001025239,
++    0.0011146986,
++    0.0010720022,
++    0.001119362
++  ],
++  "medians_seconds": [
++    0.0012863258000000001,
++    0.0010720022
++  ],
++  "speedup": 1.1999283210426248
++}
+diff --git a/src/domain.rs b/src/domain.rs
+index c4ea83e..efcff3c 100644
+--- a/src/domain.rs
++++ b/src/domain.rs
+@@ -26,6 +26,9 @@ pub struct Model {
+     timeline: Vec<u64>,
+     #[serde(skip)]
+     closed_by_resource: Vec<Vec<(u64, u64)>>,
++    /// Prefix sums of route lengths: train `t` owns verifier slots `leg_offset[t]..[t + 1]`.
++    #[serde(skip)]
++    leg_offset: Vec<usize>,
+ }
+ #[derive(Deserialize)]
+ #[serde(deny_unknown_fields)]
+@@ -132,6 +135,12 @@ pub fn prepare(mut model: Model) -> Result<Model, String> {
+     }
+     timeline.sort_unstable();
+     model.timeline = timeline;
++    model.leg_offset = std::iter::once(0)
++        .chain(model.trains.iter().scan(0, |total, t| {
++            *total += t.route.len();
++            Some(*total)
++        }))
++        .collect();
+     let mut closures = vec![Vec::new(); model.resources.len()];
+     for c in &model.closures {
+         closures[c.resource].push((c.start, c.end));
+@@ -384,9 +393,13 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
+ }
+ 
+ pub fn validate_trace(model: &Model, intervals: &[Interval]) -> Result<(), String> {
+-    let mut by_train = vec![Vec::new(); model.trains.len()];
+-    let mut by_resource = vec![Vec::new(); model.resources.len()];
+-    for row in intervals {
++    const EMPTY: usize = usize::MAX;
++    let legs = model.leg_offset[model.trains.len()];
++    // Movement index per (train, leg) slot, and movement counts per resource.
++    let mut slots = vec![EMPTY; legs];
++    let mut starts = vec![0_usize; model.resources.len() + 1];
++    let mut repeated = false;
++    for (k, row) in intervals.iter().enumerate() {
+         let Some(train) = model.trains.get(row.train) else {
+             return Err("unknown train".into());
+         };
+@@ -404,24 +417,48 @@ pub fn validate_trace(model: &Model, intervals: &[Interval]) -> Result<(), Strin
+         {
+             return Err("resource, release, service, horizon, or closure violation".into());
+         }
+-        by_train[row.train].push(row);
+-        by_resource[row.resource].push(row);
++        let slot = &mut slots[model.leg_offset[row.train] + row.leg];
++        repeated |= *slot != EMPTY;
++        *slot = k;
++        starts[row.resource + 1] += 1;
+     }
+-    for (rows, train) in by_train.iter_mut().zip(&model.trains) {
+-        rows.sort_by_key(|row| row.leg);
+-        if rows.len() != train.route.len()
+-            || rows.iter().enumerate().any(|(i, r)| i != r.leg)
+-            || rows.windows(2).any(|w| w[0].exit != w[1].entry)
+-            || rows.last().is_none_or(|r| r.exit != r.service_end)
++    // Without a repeated slot, every train has all of its legs exactly when the movement
++    // count equals the total leg count. Slots are then in leg order.
++    if repeated || intervals.len() != legs {
++        return Err("missing, repeated, or disconnected movement".into());
++    }
++    for range in model.leg_offset.windows(2) {
++        let rows = &slots[range[0]..range[1]];
++        if rows
++            .windows(2)
++            .any(|w| intervals[w[0]].exit != intervals[w[1]].entry)
++            || rows
++                .last()
++                .is_none_or(|&r| intervals[r].exit != intervals[r].service_end)
+         {
+             return Err("missing, repeated, or disconnected movement".into());
+         }
+     }
+-    for (rows, r) in by_resource.iter_mut().zip(&model.resources) {
+-        rows.sort_by_key(|row| row.entry);
++    // Stable counting pass by resource, then entry order inside each resource. Rows with
++    // equal entries on one resource fail the clearance check in either order, because
++    // every exit is after its entry.
++    for r in 0..model.resources.len() {
++        starts[r + 1] += starts[r];
++    }
++    let mut fill = starts.clone();
++    let mut by_resource = vec![(0_u64, 0_u64); intervals.len()];
++    for row in intervals {
++        by_resource[fill[row.resource]] = (row.entry, row.exit);
++        fill[row.resource] += 1;
++    }
++    for (range, resource) in starts.windows(2).zip(&model.resources) {
++        let rows = &mut by_resource[range[0]..range[1]];
++        if !rows.is_sorted_by_key(|row| row.0) {
++            rows.sort_by_key(|row| row.0);
++        }
+         if rows
+             .windows(2)
+-            .any(|w| w[0].exit + r.clearance > w[1].entry)
++            .any(|w| w[0].1 + resource.clearance > w[1].0)
+         {
+             return Err("resource capacity or clearance violation".into());
+         }
+@@ -600,7 +637,7 @@ mod tests {
+                 json!({"completed":completed,"time":time,"closed_intervals":trace.then_some(&intervals),"active":trace.then_some(active)}),
+             ));
+         }
+-        validate_trace(model, &intervals).map_err(invalid)?;
++        reference_validate(model, &intervals).map_err(invalid)?;
+         let delay: Vec<_> = trains
+             .iter()
+             .zip(&model.trains)
+@@ -620,6 +657,53 @@ mod tests {
+         ))
+     }
+ 
++    /// The 0.2.0 interval verifier.
++    fn reference_validate(model: &Model, intervals: &[Interval]) -> Result<(), String> {
++        let mut by_train = vec![Vec::new(); model.trains.len()];
++        let mut by_resource = vec![Vec::new(); model.resources.len()];
++        for row in intervals {
++            let Some(train) = model.trains.get(row.train) else {
++                return Err("unknown train".into());
++            };
++            let Some(leg) = train.route.get(row.leg) else {
++                return Err("unknown movement".into());
++            };
++            let closed = &model.closed_by_resource[leg.resource];
++            let next = closed.partition_point(|&(start, _)| start <= row.entry);
++            if row.resource != leg.resource
++                || row.entry < train.release
++                || row.exit > model.horizon
++                || row.entry.checked_add(leg.duration) != Some(row.service_end)
++                || row.service_end > row.exit
++                || (next > 0 && row.entry < closed[next - 1].1)
++            {
++                return Err("resource, release, service, horizon, or closure violation".into());
++            }
++            by_train[row.train].push(row);
++            by_resource[row.resource].push(row);
++        }
++        for (rows, train) in by_train.iter_mut().zip(&model.trains) {
++            rows.sort_by_key(|row| row.leg);
++            if rows.len() != train.route.len()
++                || rows.iter().enumerate().any(|(i, r)| i != r.leg)
++                || rows.windows(2).any(|w| w[0].exit != w[1].entry)
++                || rows.last().is_none_or(|r| r.exit != r.service_end)
++            {
++                return Err("missing, repeated, or disconnected movement".into());
++            }
++        }
++        for (rows, r) in by_resource.iter_mut().zip(&model.resources) {
++            rows.sort_by_key(|row| row.entry);
++            if rows
++                .windows(2)
++                .any(|w| w[0].exit + r.clearance > w[1].entry)
++            {
++                return Err("resource capacity or clearance violation".into());
++            }
++        }
++        Ok(())
++    }
++
+     /// Small deterministic generator for reproducible random corridors.
+     struct Lcg(u64);
+     impl Lcg {
+@@ -749,6 +833,66 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn verifier_matches_the_reference_on_corrupted_traces() {
++        let mut verdicts = std::collections::BTreeMap::new();
++        for seed in 0..300 {
++            let text = random_model(seed).to_string();
++            let Ok(model) = prepare(serde_json::from_str(&text).unwrap()) else {
++                continue;
++            };
++            let budget = Budget::default();
++            let row = run(evaluate, &model, &[1.0, 0.5], true, &budget);
++            if row["status"] != "complete" {
++                continue;
++            }
++            let trace: Vec<Interval> =
++                serde_json::from_value(row["metrics"]["intervals"].clone()).unwrap();
++            let mut rng = Lcg(seed ^ 0x5eed);
++            for _ in 0..40 {
++                let mut rows = trace.clone();
++                for _ in 0..1 + rng.below(3) {
++                    if rows.is_empty() {
++                        break;
++                    }
++                    let k = rng.below(rows.len() as u64) as usize;
++                    let delta = rng.below(3);
++                    match rng.below(11) {
++                        0 => rows[k].entry = rows[k].entry.saturating_sub(delta),
++                        1 => rows[k].exit += delta,
++                        2 => rows[k].service_end = rows[k].service_end.saturating_sub(delta),
++                        3 => rows[k].leg = (rows[k].leg + 1) % 4,
++                        4 => rows[k].train = rng.below(model.trains.len() as u64 + 1) as usize,
++                        5 => rows[k].resource = rng.below(model.resources.len() as u64) as usize,
++                        6 => {
++                            let copy = rows[k].clone();
++                            rows.push(copy);
++                        }
++                        7 => {
++                            rows.remove(k);
++                        }
++                        8 => {
++                            let j = rng.below(rows.len() as u64) as usize;
++                            rows.swap(j, k);
++                        }
++                        9 => {
++                            rows[k].entry += delta;
++                            rows[k].service_end += delta;
++                            rows[k].exit += delta;
++                        }
++                        _ => {}
++                    }
++                }
++                let expected = reference_validate(&model, &rows);
++                assert_eq!(validate_trace(&model, &rows), expected, "seed {seed}");
++                *verdicts
++                    .entry(expected.err().unwrap_or_default())
++                    .or_insert(0) += 1;
++            }
++        }
++        assert_eq!(verdicts.len(), 6, "{verdicts:?}");
++    }
++
+     #[test]
+     fn evaluate_matches_the_reference_dispatcher() {
+         let weights = [
+-- 
+2.43.0
+

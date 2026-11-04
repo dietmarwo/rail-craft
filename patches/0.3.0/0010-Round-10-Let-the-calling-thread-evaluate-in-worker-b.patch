@@ -1,0 +1,161 @@
+From 2e656801407c86c7f9ef6a00b0123cb3bf9f8235 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 11:55:17 -0400
+Subject: [PATCH 10/15] Round 10: Let the calling thread evaluate in worker
+ batches
+
+A multi-worker batch now spawns min(workers, candidates) - 1 scoped
+threads and runs the same claim loop on the calling thread, so the
+number of concurrent evaluators is unchanged and one thread start and
+join disappears. A test checks order, single evaluation per index and
+the bound on distinct evaluating threads.
+
+Workload: parallel (96 full records, 4 workers on 2 vCPUs), 11 samples.
+Before median: 0.215 ms. After median: 0.183 ms. Speedup: 1.18x.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ evidence/performance-0.3.0/plan.md            | 11 ++++
+ .../performance-0.3.0/round10-parallel.json   | 36 +++++++++++++
+ src/lib.rs                                    | 54 +++++++++++++------
+ 3 files changed, 86 insertions(+), 15 deletions(-)
+ create mode 100644 evidence/performance-0.3.0/round10-parallel.json
+
+diff --git a/evidence/performance-0.3.0/plan.md b/evidence/performance-0.3.0/plan.md
+index 19856f4..5031870 100644
+--- a/evidence/performance-0.3.0/plan.md
++++ b/evidence/performance-0.3.0/plan.md
+@@ -124,3 +124,14 @@ save its timing under `rejected/` and try something else.
+   `time_f64 - since_f64` is exact and equals the former `(time - since) as f64`.
+ - Expected effect: about 17% of lean `domain` instructions are bounds checks in the scan,
+   plus a conversion per contender. Expect 1.1x to 1.3x.
++
++### Round 10: calling thread joins the worker set
++
++- Workload: `parallel` (96 full records, 4 workers on this 2-vCPU host), round 9 against
++  round 10.
++- Change: a multi-worker batch spawns `min(workers, candidates) - 1` scoped threads and the
++  calling thread runs the same claim loop instead of only waiting, so the number of
++  concurrent evaluators is unchanged and one thread start and join disappears. The caller
++  starts evaluating while the spawned threads start.
++- Expected effect: thread start and join dominate this workload (the 4-worker batch takes
++  about 2.4x the serial time). Expect 1.1x to 1.3x.
+diff --git a/evidence/performance-0.3.0/round10-parallel.json b/evidence/performance-0.3.0/round10-parallel.json
+new file mode 100644
+index 0000000..e3e4f22
+--- /dev/null
++++ b/evidence/performance-0.3.0/round10-parallel.json
+@@ -0,0 +1,36 @@
++{
++  "workload": "parallel",
++  "before_mode": "full",
++  "after_mode": "full",
++  "before_seconds": [
++    0.00025025975,
++    0.0002423735,
++    0.00021858975,
++    0.000216706,
++    0.00021461225,
++    0.0003067095,
++    0.00020964025,
++    0.00017768125,
++    0.000195353,
++    0.0002057515,
++    0.00020346125
++  ],
++  "after_seconds": [
++    0.000184624,
++    0.00019344225,
++    0.00018256575,
++    0.00018773325,
++    0.00017523,
++    0.00023419475,
++    0.00016772725,
++    0.000145201,
++    0.000150718,
++    0.000197608,
++    0.0001777855
++  ],
++  "medians_seconds": [
++    0.00021461225,
++    0.00018256575
++  ],
++  "speedup": 1.1755340199352835
++}
+diff --git a/src/lib.rs b/src/lib.rs
+index 3eb7751..d90d218 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -146,23 +146,26 @@ fn dispatch<T: Send + Sync>(
+     }
+     let next = AtomicUsize::new(0);
+     let slots: Vec<_> = (0..count).map(|_| OnceLock::new()).collect();
++    let work = || {
++        let mut scratch = pool.take();
++        loop {
++            let index = next.fetch_add(1, Ordering::Relaxed);
++            if index >= count {
++                break;
++            }
++            assert!(
++                slots[index].set(evaluate(&mut scratch, index)).is_ok(),
++                "duplicate work index"
++            );
++        }
++        pool.give(scratch);
++    };
++    // The calling thread is one of the `min(workers, count)` concurrent evaluators.
+     std::thread::scope(|scope| {
+-        for _ in 0..workers.min(count) {
+-            scope.spawn(|| {
+-                let mut scratch = pool.take();
+-                loop {
+-                    let index = next.fetch_add(1, Ordering::Relaxed);
+-                    if index >= count {
+-                        break;
+-                    }
+-                    assert!(
+-                        slots[index].set(evaluate(&mut scratch, index)).is_ok(),
+-                        "duplicate work index"
+-                    );
+-                }
+-                pool.give(scratch);
+-            });
++        for _ in 1..workers.min(count) {
++            scope.spawn(work);
+         }
++        work();
+     });
+     slots
+         .into_iter()
+@@ -745,6 +748,27 @@ mod tests {
+         assert_eq!(pool.len(), ScratchPool::LIMIT);
+     }
+ 
++    #[test]
++    fn dispatch_keeps_order_and_bounds_concurrent_evaluators() {
++        let pool = ScratchPool::default();
++        for (count, workers) in [(1, 4), (2, 4), (5, 2), (97, 4), (64, 64), (3, 1)] {
++            let calls = AtomicUsize::new(0);
++            let threads = Mutex::new(HashSet::new());
++            let rows = dispatch(&pool, count, workers, |_, index| {
++                calls.fetch_add(1, Ordering::Relaxed);
++                threads.lock().unwrap().insert(std::thread::current().id());
++                index * 3
++            });
++            assert_eq!(rows, (0..count).map(|i| i * 3).collect::<Vec<_>>());
++            assert_eq!(calls.load(Ordering::Relaxed), count);
++            let used = threads.lock().unwrap().len();
++            assert!(
++                (1..=workers.min(count)).contains(&used),
++                "{count} {workers} {used}"
++            );
++        }
++    }
++
+     #[test]
+     fn model_and_candidate_validation_are_independent() {
+         let mut example = fixture();
+-- 
+2.43.0
+

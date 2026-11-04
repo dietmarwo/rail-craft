@@ -1,0 +1,83 @@
+{
+  "binary": "0.3.0 release examples/performance",
+  "method": "median of 11 loops of 10x the workload repeats, per call",
+  "workloads": [
+    {
+      "budget": "{\"workers\":1}",
+      "candidates": 1,
+      "per_call_seconds": {
+        "decode": 2.37435e-07,
+        "full": 1.3957425e-06,
+        "lean": 1.1875325e-06,
+        "matrix": 4.9492e-07
+      },
+      "workload": "one"
+    },
+    {
+      "budget": "{\"workers\":1}",
+      "candidates": 96,
+      "per_call_seconds": {
+        "decode": 1.9375475e-05,
+        "full": 9.5068325e-05,
+        "lean": 7.4707225e-05,
+        "matrix": 3.7207325e-05
+      },
+      "workload": "serial"
+    },
+    {
+      "budget": "{\"workers\":4}",
+      "candidates": 96,
+      "per_call_seconds": {
+        "decode": 1.98113e-05,
+        "full": 0.00020626205,
+        "lean": 0.000195286825,
+        "matrix": 0.00014462015
+      },
+      "workload": "parallel"
+    },
+    {
+      "budget": "{\"workers\":1}",
+      "candidates": 12,
+      "per_call_seconds": {
+        "decode": 3.1848666666666664e-06,
+        "full": 2.3200816666666667e-05,
+        "lean": null,
+        "matrix": null
+      },
+      "workload": "trace"
+    },
+    {
+      "budget": "{\"workers\":1}",
+      "candidates": 1024,
+      "per_call_seconds": {
+        "decode": 0.0011853693166666668,
+        "full": 0.0013304536666666666,
+        "lean": 0.0013472526333333334,
+        "matrix": 1.8698866666666665e-05
+      },
+      "workload": "invalid"
+    },
+    {
+      "budget": "{\"workers\":1}",
+      "candidates": 48,
+      "per_call_seconds": {
+        "decode": 7.05916e-06,
+        "full": 0.0009316361400000001,
+        "lean": 0.00088825604,
+        "matrix": 0.0008958417
+      },
+      "workload": "domain"
+    },
+    {
+      "budget": "{\"workers\":1}",
+      "candidates": 48,
+      "per_call_seconds": {
+        "decode": 9.6815e-06,
+        "full": 0.0009507828999999999,
+        "lean": 0.00085695434,
+        "matrix": 0.00085198014
+      },
+      "workload": "domain2"
+    }
+  ]
+}

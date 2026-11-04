@@ -1,0 +1,279 @@
+From 19d06db1b1ab503685d2a93ae755c34b5a1649ca Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 11:39:51 -0400
+Subject: [PATCH 04/15] Round 4: Merge a prepared static timeline with a small
+ event heap
+
+Sort releases and closure starts and ends once at preparation as packed
+u64 keys that preserve the (tick, kind, index) order. Each candidate
+walks this timeline with a cursor and merges it with a binary heap that
+holds only service completions and clearance wakes, so the per-candidate
+heap clone and the static pops disappear.
+
+Workload: domain2 (48 full records, 100 trains, 300 closures), 11 samples.
+Before median: 2.191 ms. After median: 1.320 ms. Speedup: 1.66x.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ evidence/performance-0.3.0/plan.md            |  11 ++
+ .../performance-0.3.0/round04-domain2.json    |  36 ++++++
+ src/domain.rs                                 | 103 ++++++++++++++----
+ 3 files changed, 127 insertions(+), 23 deletions(-)
+ create mode 100644 evidence/performance-0.3.0/round04-domain2.json
+
+diff --git a/evidence/performance-0.3.0/plan.md b/evidence/performance-0.3.0/plan.md
+index 9f0b669..f8ec78c 100644
+--- a/evidence/performance-0.3.0/plan.md
++++ b/evidence/performance-0.3.0/plan.md
+@@ -50,3 +50,14 @@ save its timing under `rejected/` and try something else.
+   `i64`, which yields the same `f64` for every possible wait.
+ - Expected effect: the per-contender comparator chain is the largest remaining cost
+   (about 60% of instructions). Expect 1.2x to 1.4x.
++
++### Round 4: static event timeline and packed dynamic heap
++
++- Workload: `domain2` (48 full records, 100 trains, 300 closures), round 3 against round 4.
++- Change: releases and closure starts and ends do not depend on the candidate. Sort them once
++  at preparation into a timeline of packed `u64` keys (tick, kind, index), which preserve the
++  tuple order. Each candidate walks the timeline with a cursor and merges it with a small
++  binary heap that holds only service completions and clearance wakes. This removes the
++  per-candidate heap clone and the logarithmic pops of 700 static events.
++- Expected effect: heap work is about 19% of `domain2` instructions after round 3, plus the
++  clone. Expect 1.1x to 1.25x.
+diff --git a/evidence/performance-0.3.0/round04-domain2.json b/evidence/performance-0.3.0/round04-domain2.json
+new file mode 100644
+index 0000000..ea01b90
+--- /dev/null
++++ b/evidence/performance-0.3.0/round04-domain2.json
+@@ -0,0 +1,36 @@
++{
++  "workload": "domain2",
++  "before_mode": "full",
++  "after_mode": "full",
++  "before_seconds": [
++    0.0021125324,
++    0.0029606718,
++    0.0023347492,
++    0.0021103686,
++    0.002250845,
++    0.0021917684,
++    0.0022273698,
++    0.0020890318,
++    0.0021906525999999997,
++    0.0021698044,
++    0.0021617733999999998
++  ],
++  "after_seconds": [
++    0.0013034846,
++    0.0013098552,
++    0.0013323084,
++    0.001321797,
++    0.0014852502,
++    0.0013094518,
++    0.0013854236,
++    0.0013040932,
++    0.0016037923999999999,
++    0.001319981,
++    0.0013070546
++  ],
++  "medians_seconds": [
++    0.0021906525999999997,
++    0.001319981
++  ],
++  "speedup": 1.6596091913444206
++}
+diff --git a/src/domain.rs b/src/domain.rs
+index 6f7ccc9..c4ea83e 100644
+--- a/src/domain.rs
++++ b/src/domain.rs
+@@ -21,8 +21,9 @@ pub struct Model {
+     horizon: u64,
+     #[serde(default)]
+     closures: Vec<Closure>,
++    /// Candidate-independent events (releases, closure starts and ends) as sorted keys.
+     #[serde(skip)]
+-    initial_events: BinaryHeap<Event>,
++    timeline: Vec<u64>,
+     #[serde(skip)]
+     closed_by_resource: Vec<Vec<(u64, u64)>>,
+ }
+@@ -66,7 +67,21 @@ pub struct Interval {
+     exit: u64,
+ }
+ 
+-type Event = Reverse<(u64, u8, usize)>;
++/// Event kinds in processing order at one tick.
++const COMPLETION: u64 = 0;
++const CLOSURE_END: u64 = 1;
++const CLOSURE_START: u64 = 2;
++const RELEASE: u64 = 3;
++const WAKE: u64 = 4;
++
++/// Pack an event into one key whose unsigned order is the (tick, kind, index) order.
++/// Ticks stay below 2^31 (horizon, durations and clearances are at most 10^9 each and an
++/// event lies at most one duration or clearance past a tick within the horizon) and
++/// indexes below 512 (closures), so the key never reaches `u64::MAX`.
++#[inline]
++fn event_key(tick: u64, kind: u64, index: usize) -> u64 {
++    (tick << 12) | (kind << 9) | index as u64
++}
+ 
+ pub fn prepare(mut model: Model) -> Result<Model, String> {
+     if !(1..=128).contains(&model.resources.len())
+@@ -107,15 +122,16 @@ pub fn prepare(mut model: Model) -> Result<Model, String> {
+         return Err("invalid closure interval".into());
+     }
+     // Order at a tick: completions, closure ends, closure starts, releases, wakes.
+-    let mut events = Vec::with_capacity(model.trains.len() + 2 * model.closures.len());
++    let mut timeline = Vec::with_capacity(model.trains.len() + 2 * model.closures.len());
+     for (i, train) in model.trains.iter().enumerate() {
+-        events.push(Reverse((train.release, 3, i)));
++        timeline.push(event_key(train.release, RELEASE, i));
+     }
+     for (i, c) in model.closures.iter().enumerate() {
+-        events.push(Reverse((c.start, 2, i)));
+-        events.push(Reverse((c.end, 1, i)));
++        timeline.push(event_key(c.start, CLOSURE_START, i));
++        timeline.push(event_key(c.end, CLOSURE_END, i));
+     }
+-    model.initial_events = BinaryHeap::from(events);
++    timeline.sort_unstable();
++    model.timeline = timeline;
+     let mut closures = vec![Vec::new(); model.resources.len()];
+     for c in &model.closures {
+         closures[c.resource].push((c.start, c.end));
+@@ -185,7 +201,10 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
+     // Dense dispatch state: waiting start and tie-break tail per ready train.
+     let mut since_of = vec![0_u64; model.trains.len()];
+     let mut tail_of = vec![0_u64; model.trains.len()];
+-    let mut events = model.initial_events.clone();
++    // Prepared static events are merged with completions and clearance wakes.
++    let timeline = model.timeline.as_slice();
++    let mut cursor = 0;
++    let mut events = BinaryHeap::with_capacity(model.trains.len() + model.resources.len());
+     let mut intervals = Vec::new();
+     let mut completed = 0;
+     // Ready trains grouped by the resource of their next leg, plus the resources
+@@ -197,33 +216,50 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
+                    time,
+                    resources: &mut [ResourceState],
+                    intervals: &mut Vec<Interval>,
+-                   events: &mut BinaryHeap<_>| {
++                   events: &mut BinaryHeap<Reverse<u64>>| {
+         interval.exit = time;
+         let r = interval.resource;
+         resources[r].owner = None;
+         resources[r].free_after = time + model.resources[r].clearance;
+         if resources[r].free_after > time {
+-            events.push(Reverse((resources[r].free_after, 4, r)));
++            events.push(Reverse(event_key(resources[r].free_after, WAKE, r)));
+         }
+         intervals.push(interval);
+     };
+-    while let Some(&Reverse((at, _, _))) = events.peek() {
++    // The next event is the smaller of the timeline head and the heap top.
++    let next_event = |cursor: usize, events: &BinaryHeap<Reverse<u64>>| {
++        let fixed = timeline.get(cursor).copied().unwrap_or(u64::MAX);
++        let dynamic = events.peek().map_or(u64::MAX, |e| e.0);
++        (fixed.min(dynamic), fixed <= dynamic)
++    };
++    loop {
++        let (first, _) = next_event(cursor, &events);
++        if first == u64::MAX {
++            break;
++        }
++        let at = first >> 12;
+         if at > model.horizon {
+             break;
+         }
+         time = at;
+-        while events
+-            .peek()
+-            .is_some_and(|Reverse((event_time, _, _))| *event_time == at)
+-        {
++        loop {
++            let (key, from_timeline) = next_event(cursor, &events);
++            if key == u64::MAX || key >> 12 != at {
++                break;
++            }
+             if let Err(e) = work.step() {
+                 return Err(e.with_metrics(
+                     json!({"closed_intervals": trace.then_some(&intervals), "completed":completed, "time":time}),
+                 ));
+             }
+-            let Reverse((_, kind, i)) = events.pop().expect("peeked event");
+-            match kind {
+-                0 => {
++            if from_timeline {
++                cursor += 1;
++            } else {
++                events.pop();
++            }
++            let i = (key & 511) as usize;
++            match (key >> 9) & 7 {
++                COMPLETION => {
+                     let state = &mut trains[i];
+                     if state.next == model.trains[i].route.len() {
+                         release(
+@@ -243,9 +279,9 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
+                         tail_of[i] = tie_tail(time, i);
+                     }
+                 }
+-                1 => resources[model.closures[i].resource].closures -= 1,
+-                2 => resources[model.closures[i].resource].closures += 1,
+-                3 => {
++                CLOSURE_END => resources[model.closures[i].resource].closures -= 1,
++                CLOSURE_START => resources[model.closures[i].resource].closures += 1,
++                RELEASE => {
+                     let r = model.trains[i].route[0].resource;
+                     ready_on[r] |= 1_u128 << i;
+                     waiting_resources |= 1_u128 << r;
+@@ -310,7 +346,7 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
+             if ready_on[leg.resource] == 0 {
+                 waiting_resources &= !(1_u128 << leg.resource);
+             }
+-            events.push(Reverse((end, 0, i)));
++            events.push(Reverse(event_key(end, COMPLETION, i)));
+         }
+         if completed == trains.len() {
+             break;
+@@ -318,7 +354,7 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
+     }
+     if completed != trains.len() {
+         let active: Vec<_> = trains.iter().filter_map(|t| t.held.as_ref()).collect();
+-        let reason = if events.is_empty() {
++        let reason = if events.is_empty() && cursor == timeline.len() {
+             "deadlock"
+         } else {
+             "horizon"
+@@ -692,6 +728,27 @@ mod tests {
+         assert_eq!(127 - (tie_tail(0, 0) & 127), 0);
+     }
+ 
++    #[test]
++    fn event_keys_preserve_tuple_order() {
++        let ticks = [0, 1, 2, 999_999_999, 1_000_000_000, 2_000_000_000];
++        let mut tuples = Vec::new();
++        for tick in ticks {
++            for kind in [COMPLETION, CLOSURE_END, CLOSURE_START, RELEASE, WAKE] {
++                for index in [0, 1, 127, 511] {
++                    tuples.push((tick, kind, index));
++                }
++            }
++        }
++        for &a in &tuples {
++            let key = event_key(a.0, a.1, a.2);
++            assert_eq!((key >> 12, (key >> 9) & 7, (key & 511) as usize), a);
++            assert!(key < u64::MAX);
++            for &b in &tuples {
++                assert_eq!(key.cmp(&event_key(b.0, b.1, b.2)), a.cmp(&b));
++            }
++        }
++    }
++
+     #[test]
+     fn evaluate_matches_the_reference_dispatcher() {
+         let weights = [
+-- 
+2.43.0
+

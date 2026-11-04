@@ -1,0 +1,468 @@
+From 8a1268041619b03ef685c2eac9d610835cdcde00 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 11:45:46 -0400
+Subject: [PATCH 06/15] Round 6: Reuse per-worker scratch buffers across
+ candidates
+
+Move the kernel's and verifier's per-candidate buffers into a
+domain::Scratch that the inline caller or each worker creates once per
+batch and resets per candidate. Build the delay vector only for
+metrics; the score adds the same terms in the same order. The
+randomized tests reuse one scratch across all models.
+
+Workload: serial in matrix mode (96 example candidates), 11 samples.
+Before median: 0.101 ms. After median: 0.060 ms. Speedup: 1.67x.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ evidence/performance-0.3.0/plan.md            |  12 ++
+ .../round06-matrix-serial.json                |  36 +++++
+ src/domain.rs                                 | 151 ++++++++++++++----
+ src/lib.rs                                    |  37 +++--
+ 4 files changed, 191 insertions(+), 45 deletions(-)
+ create mode 100644 evidence/performance-0.3.0/round06-matrix-serial.json
+
+diff --git a/evidence/performance-0.3.0/plan.md b/evidence/performance-0.3.0/plan.md
+index aacda4f..aea7619 100644
+--- a/evidence/performance-0.3.0/plan.md
++++ b/evidence/performance-0.3.0/plan.md
+@@ -78,3 +78,15 @@ save its timing under `rejected/` and try something else.
+   traces.
+ - Expected effect: the verifier and its allocations are about 22% of the lean `domain`
+   instructions. Expect 1.1x to 1.2x.
++
++### Round 6: per-worker scratch buffers
++
++- Workload: `serial` in matrix mode (`--before-matrix --after-matrix`, 96 example
++  candidates), round 5 against round 6.
++- Change: move every per-candidate buffer of the kernel and verifier (train and resource
++  state, weighted priorities, waiting arrays, ready masks, event heap, interval list, verifier
++  slots and resource groups) into a `domain::Scratch` that each worker, or the inline caller,
++  creates once per batch and resets per candidate. The delay vector is built only when
++  metrics are requested; the score keeps the same summation order.
++- Expected effect: about 20 allocations and frees per candidate disappear; in the small
++  example they are about a third of the instructions. Expect 1.2x to 1.5x.
+diff --git a/evidence/performance-0.3.0/round06-matrix-serial.json b/evidence/performance-0.3.0/round06-matrix-serial.json
+new file mode 100644
+index 0000000..106b2e6
+--- /dev/null
++++ b/evidence/performance-0.3.0/round06-matrix-serial.json
+@@ -0,0 +1,36 @@
++{
++  "workload": "serial",
++  "before_mode": "matrix",
++  "after_mode": "matrix",
++  "before_seconds": [
++    8.04095e-05,
++    7.1397e-05,
++    7.970425e-05,
++    9.45725e-05,
++    9.234325e-05,
++    0.00010270375,
++    0.0001032305,
++    0.000104361,
++    0.00010069925,
++    0.00010262075,
++    0.00010242875
++  ],
++  "after_seconds": [
++    4.224125e-05,
++    4.15225e-05,
++    7.590675e-05,
++    5.7577e-05,
++    6.01455e-05,
++    7.1145e-05,
++    5.98655e-05,
++    5.937025e-05,
++    6.7822e-05,
++    7.4821e-05,
++    7.103275e-05
++  ],
++  "medians_seconds": [
++    0.00010069925,
++    6.01455e-05
++  ],
++  "speedup": 1.6742607510121288
++}
+diff --git a/src/domain.rs b/src/domain.rs
+index efcff3c..f4ad284 100644
+--- a/src/domain.rs
++++ b/src/domain.rs
+@@ -193,32 +193,76 @@ struct ResourceState {
+     closures: u32,
+ }
+ 
+-pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<'_>) -> Evaluation {
++/// Reusable per-worker buffers for `evaluate`. Every buffer is reset before use, so one
++/// scratch can serve any sequence of candidates and models.
++#[derive(Default)]
++pub struct Scratch {
++    trains: Vec<TrainState>,
++    resources: Vec<ResourceState>,
++    weighted_priority: Vec<f64>,
++    since_of: Vec<u64>,
++    tail_of: Vec<u64>,
++    ready_on: Vec<u128>,
++    events: BinaryHeap<Reverse<u64>>,
++    intervals: Vec<Interval>,
++    verify: VerifyScratch,
++}
++
++/// Reusable buffers for the interval verifier.
++#[derive(Default)]
++struct VerifyScratch {
++    slots: Vec<usize>,
++    starts: Vec<usize>,
++    fill: Vec<usize>,
++    by_resource: Vec<(u64, u64)>,
++}
++
++pub fn evaluate(
++    model: &Model,
++    parameters: &[f64],
++    trace: bool,
++    work: &mut Work<'_>,
++    scratch: &mut Scratch,
++) -> Evaluation {
+     let &[priority, age] = parameters else {
+         return Err(invalid("expected priority and waiting-time weights"));
+     };
+     if ![priority, age].iter().all(|v| (0.0..=10.0).contains(v)) {
+         return Err(invalid("weights must be in [0,10]"));
+     }
+-    let mut trains: Vec<_> = model.trains.iter().map(|_| TrainState::default()).collect();
+-    let mut resources: Vec<_> = model
+-        .resources
+-        .iter()
+-        .map(|_| ResourceState::default())
+-        .collect();
+-    let weighted_priority: Vec<_> = model.trains.iter().map(|t| priority * t.priority).collect();
++    let Scratch {
++        trains,
++        resources,
++        weighted_priority,
++        since_of,
++        tail_of,
++        ready_on,
++        events,
++        intervals,
++        verify,
++    } = scratch;
++    let n = model.trains.len();
++    trains.clear();
++    trains.resize_with(n, TrainState::default);
++    resources.clear();
++    resources.resize_with(model.resources.len(), ResourceState::default);
++    weighted_priority.clear();
++    weighted_priority.extend(model.trains.iter().map(|t| priority * t.priority));
+     // Dense dispatch state: waiting start and tie-break tail per ready train.
+-    let mut since_of = vec![0_u64; model.trains.len()];
+-    let mut tail_of = vec![0_u64; model.trains.len()];
++    since_of.clear();
++    since_of.resize(n, 0);
++    tail_of.clear();
++    tail_of.resize(n, 0);
+     // Prepared static events are merged with completions and clearance wakes.
+     let timeline = model.timeline.as_slice();
+     let mut cursor = 0;
+-    let mut events = BinaryHeap::with_capacity(model.trains.len() + model.resources.len());
+-    let mut intervals = Vec::new();
++    events.clear();
++    intervals.clear();
+     let mut completed = 0;
+     // Ready trains grouped by the resource of their next leg, plus the resources
+     // that have at least one ready train. Both models are limited to 128 entries.
+-    let mut ready_on = vec![0_u128; model.resources.len()];
++    ready_on.clear();
++    ready_on.resize(model.resources.len(), 0);
+     let mut waiting_resources = 0_u128;
+     let mut time = 0;
+     let release = |mut interval: Interval,
+@@ -242,7 +286,7 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
+         (fixed.min(dynamic), fixed <= dynamic)
+     };
+     loop {
+-        let (first, _) = next_event(cursor, &events);
++        let (first, _) = next_event(cursor, events);
+         if first == u64::MAX {
+             break;
+         }
+@@ -252,7 +296,7 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
+         }
+         time = at;
+         loop {
+-            let (key, from_timeline) = next_event(cursor, &events);
++            let (key, from_timeline) = next_event(cursor, events);
+             if key == u64::MAX || key >> 12 != at {
+                 break;
+             }
+@@ -274,9 +318,9 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
+                         release(
+                             state.held.take().expect("active train"),
+                             time,
+-                            &mut resources,
+-                            &mut intervals,
+-                            &mut events,
++                            resources,
++                            intervals,
++                            events,
+                         );
+                         state.arrival = Some(time);
+                         completed += 1;
+@@ -337,7 +381,7 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
+             }
+             let state = &mut trains[i];
+             if let Some(previous) = state.held.take() {
+-                release(previous, time, &mut resources, &mut intervals, &mut events);
++                release(previous, time, resources, intervals, events);
+             }
+             let leg = &model.trains[i].route[state.next];
+             let end = time + leg.duration;
+@@ -372,32 +416,47 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
+             json!({"completed":completed,"time":time,"closed_intervals":trace.then_some(&intervals),"active":trace.then_some(active)}),
+         ));
+     }
+-    validate_trace(model, &intervals).map_err(invalid)?;
+-    let delay: Vec<_> = trains
+-        .iter()
+-        .zip(&model.trains)
+-        .map(|(s, t)| s.arrival.expect("completed").saturating_sub(t.planned))
+-        .collect();
+-    let score: f64 = delay
++    validate_with(model, intervals, verify).map_err(invalid)?;
++    let delay =
++        |(s, t): (&TrainState, &Train)| s.arrival.expect("completed").saturating_sub(t.planned);
++    // Same per-train terms, added in the same order, as summing a delay vector.
++    let score: f64 = trains
+         .iter()
+         .zip(&model.trains)
+-        .map(|(&d, t)| d as f64 * (1.0 + t.priority))
++        .map(|pair| delay(pair) as f64 * (1.0 + pair.1.priority))
+         .sum();
+     Ok((
+         score,
+         work.metrics(|| {
++            let delay: Vec<_> = trains.iter().zip(&model.trains).map(delay).collect();
+             json!({"completed":completed,"max_delay":delay.iter().max(),"delays":delay,
+-        "intervals":trace.then_some(intervals)})
++        "intervals":trace.then_some(&*intervals)})
+         }),
+     ))
+ }
+ 
+ pub fn validate_trace(model: &Model, intervals: &[Interval]) -> Result<(), String> {
++    validate_with(model, intervals, &mut VerifyScratch::default())
++}
++
++fn validate_with(
++    model: &Model,
++    intervals: &[Interval],
++    scratch: &mut VerifyScratch,
++) -> Result<(), String> {
+     const EMPTY: usize = usize::MAX;
++    let VerifyScratch {
++        slots,
++        starts,
++        fill,
++        by_resource,
++    } = scratch;
+     let legs = model.leg_offset[model.trains.len()];
+     // Movement index per (train, leg) slot, and movement counts per resource.
+-    let mut slots = vec![EMPTY; legs];
+-    let mut starts = vec![0_usize; model.resources.len() + 1];
++    slots.clear();
++    slots.resize(legs, EMPTY);
++    starts.clear();
++    starts.resize(model.resources.len() + 1, 0);
+     let mut repeated = false;
+     for (k, row) in intervals.iter().enumerate() {
+         let Some(train) = model.trains.get(row.train) else {
+@@ -445,8 +504,10 @@ pub fn validate_trace(model: &Model, intervals: &[Interval]) -> Result<(), Strin
+     for r in 0..model.resources.len() {
+         starts[r + 1] += starts[r];
+     }
+-    let mut fill = starts.clone();
+-    let mut by_resource = vec![(0_u64, 0_u64); intervals.len()];
++    fill.clear();
++    fill.extend_from_slice(starts);
++    by_resource.clear();
++    by_resource.resize(intervals.len(), (0, 0));
+     for row in intervals {
+         by_resource[fill[row.resource]] = (row.entry, row.exit);
+         fill[row.resource] += 1;
+@@ -761,7 +822,7 @@ mod tests {
+     }
+ 
+     fn run(
+-        kernel: fn(&Model, &[f64], bool, &mut Work<'_>) -> Evaluation,
++        mut kernel: impl FnMut(&Model, &[f64], bool, &mut Work<'_>) -> Evaluation,
+         model: &Model,
+         parameters: &[f64],
+         trace: bool,
+@@ -836,13 +897,20 @@ mod tests {
+     #[test]
+     fn verifier_matches_the_reference_on_corrupted_traces() {
+         let mut verdicts = std::collections::BTreeMap::new();
++        let mut shared = VerifyScratch::default();
+         for seed in 0..300 {
+             let text = random_model(seed).to_string();
+             let Ok(model) = prepare(serde_json::from_str(&text).unwrap()) else {
+                 continue;
+             };
+             let budget = Budget::default();
+-            let row = run(evaluate, &model, &[1.0, 0.5], true, &budget);
++            let row = run(
++                |m, p, t, w| evaluate(m, p, t, w, &mut Scratch::default()),
++                &model,
++                &[1.0, 0.5],
++                true,
++                &budget,
++            );
+             if row["status"] != "complete" {
+                 continue;
+             }
+@@ -885,6 +953,11 @@ mod tests {
+                 }
+                 let expected = reference_validate(&model, &rows);
+                 assert_eq!(validate_trace(&model, &rows), expected, "seed {seed}");
++                assert_eq!(
++                    validate_with(&model, &rows, &mut shared),
++                    expected,
++                    "seed {seed}"
++                );
+                 *verdicts
+                     .entry(expected.err().unwrap_or_default())
+                     .or_insert(0) += 1;
+@@ -905,6 +978,8 @@ mod tests {
+             [-0.0, -0.0],
+         ];
+         let mut outcomes = std::collections::BTreeMap::new();
++        // One scratch serves every model and candidate, as a worker's scratch does.
++        let mut scratch = Scratch::default();
+         for seed in 0..400 {
+             let text = random_model(seed).to_string();
+             let Ok(model) = prepare(serde_json::from_str(&text).unwrap()) else {
+@@ -918,7 +993,13 @@ mod tests {
+                         ..Budget::default()
+                     };
+                     let expected = run(reference, &model, parameters, trace, &budget);
+-                    let actual = run(evaluate, &model, parameters, trace, &budget);
++                    let actual = run(
++                        |m, p, t, w| evaluate(m, p, t, w, &mut scratch),
++                        &model,
++                        parameters,
++                        trace,
++                        &budget,
++                    );
+                     assert_eq!(actual, expected, "seed {seed} weights {parameters:?}");
+                     *outcomes
+                         .entry(format!("{}:{}", expected["status"], expected["detail"]))
+diff --git a/src/lib.rs b/src/lib.rs
+index c1c45b1..e06adaf 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -96,26 +96,29 @@ pub struct MatrixScore {
+ }
+ 
+ /// Evaluate `count` independent items inline or on scoped workers, in input order.
++/// The inline caller and each worker reuse one domain scratch for all of their items.
+ fn dispatch<T: Send + Sync>(
+     count: usize,
+     workers: usize,
+-    evaluate: impl Fn(usize) -> T + Sync,
++    evaluate: impl Fn(&mut domain::Scratch, usize) -> T + Sync,
+ ) -> Vec<T> {
+     if workers == 1 || count == 1 {
+-        return (0..count).map(evaluate).collect();
++        let mut scratch = domain::Scratch::default();
++        return (0..count).map(|i| evaluate(&mut scratch, i)).collect();
+     }
+     let next = AtomicUsize::new(0);
+     let slots: Vec<_> = (0..count).map(|_| OnceLock::new()).collect();
+     std::thread::scope(|scope| {
+         for _ in 0..workers.min(count) {
+             scope.spawn(|| {
++                let mut scratch = domain::Scratch::default();
+                 loop {
+                     let index = next.fetch_add(1, Ordering::Relaxed);
+                     if index >= count {
+                         break;
+                     }
+                     assert!(
+-                        slots[index].set(evaluate(index)).is_ok(),
++                        slots[index].set(evaluate(&mut scratch, index)).is_ok(),
+                         "duplicate work index"
+                     );
+                 }
+@@ -271,9 +274,9 @@ impl Prepared {
+             return Err("invalid budget or batch size".into());
+         }
+         let deadline = budget.deadline();
+-        Ok(dispatch(rows, budget.workers, |row| {
++        Ok(dispatch(rows, budget.workers, |scratch, row| {
+             let values = &parameters[row * dimension..(row + 1) * dimension];
+-            let (result, steps) = self.outcome(values, false, &budget, deadline, false);
++            let (result, steps) = self.outcome(scratch, values, false, &budget, deadline, false);
+             match result {
+                 Ok((score, _)) => MatrixScore {
+                     status: "complete",
+@@ -291,6 +294,7 @@ impl Prepared {
+ 
+     fn outcome(
+         &self,
++        scratch: &mut domain::Scratch,
+         parameters: &[f64],
+         trace: bool,
+         budget: &Budget,
+@@ -304,7 +308,7 @@ impl Prepared {
+             metrics_enabled,
+             monitored: deadline.is_some() || budget.cancel_file.is_some(),
+         };
+-        let result = domain::evaluate(&self.model, parameters, trace, &mut work);
++        let result = domain::evaluate(&self.model, parameters, trace, &mut work, scratch);
+         let result = result.and_then(|(score, metrics)| {
+             if score.is_finite() {
+                 Ok((score, metrics))
+@@ -317,13 +321,20 @@ impl Prepared {
+ 
+     fn record<'a>(
+         &self,
++        scratch: &mut domain::Scratch,
+         c: &'a Candidate,
+         budget: &Budget,
+         deadline: Option<Instant>,
+         metrics_enabled: bool,
+     ) -> Record<'a> {
+-        let (result, steps) =
+-            self.outcome(&c.parameters, c.trace, budget, deadline, metrics_enabled);
++        let (result, steps) = self.outcome(
++            scratch,
++            &c.parameters,
++            c.trace,
++            budget,
++            deadline,
++            metrics_enabled,
++        );
+         match result {
+             Ok((score, metrics)) => Record {
+                 id: &c.id,
+@@ -366,8 +377,14 @@ impl Prepared {
+             return Err("at most 16 traced candidates per batch".into());
+         }
+         let deadline = budget.deadline();
+-        let records = dispatch(candidates.len(), budget.workers, |index| {
+-            self.record(&candidates[index], &budget, deadline, metrics_enabled)
++        let records = dispatch(candidates.len(), budget.workers, |scratch, index| {
++            self.record(
++                scratch,
++                &candidates[index],
++                &budget,
++                deadline,
++                metrics_enabled,
++            )
+         });
+         Ok(Batch {
+             model_sha256: &self.model_sha256,
+-- 
+2.43.0
+

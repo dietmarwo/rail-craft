@@ -1,0 +1,70 @@
+From 3d8a4cf53e213d9e31823e9f8320687eb0fe4c18 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Wed, 4 Nov 2026 02:52:32 +0100
+Subject: [PATCH 09/12] Prepare a reusable rail event heap
+
+---
+ src/domain.rs | 26 ++++++++++++++++----------
+ 1 file changed, 16 insertions(+), 10 deletions(-)
+
+diff --git a/src/domain.rs b/src/domain.rs
+index a892450..c8fdf60 100644
+--- a/src/domain.rs
++++ b/src/domain.rs
+@@ -21,6 +21,8 @@ pub struct Model {
+     horizon: u64,
+     #[serde(default)]
+     closures: Vec<Closure>,
++    #[serde(skip)]
++    initial_events: BinaryHeap<Event>,
+ }
+ #[derive(Deserialize)]
+ #[serde(deny_unknown_fields)]
+@@ -62,7 +64,9 @@ pub struct Interval {
+     exit: u64,
+ }
+ 
+-pub fn prepare(model: Model) -> Result<Model, String> {
++type Event = Reverse<(u64, u8, usize)>;
++
++pub fn prepare(mut model: Model) -> Result<Model, String> {
+     if !(1..=128).contains(&model.resources.len())
+         || !(1..=128).contains(&model.trains.len())
+         || !(1..=1_000_000_000).contains(&model.horizon)
+@@ -100,6 +104,16 @@ pub fn prepare(model: Model) -> Result<Model, String> {
+     {
+         return Err("invalid closure interval".into());
+     }
++    // Order at a tick: completions, closure ends, closure starts, releases, wakes.
++    let mut events = Vec::with_capacity(model.trains.len() + 2 * model.closures.len());
++    for (i, train) in model.trains.iter().enumerate() {
++        events.push(Reverse((train.release, 3, i)));
++    }
++    for (i, c) in model.closures.iter().enumerate() {
++        events.push(Reverse((c.start, 2, i)));
++        events.push(Reverse((c.end, 1, i)));
++    }
++    model.initial_events = BinaryHeap::from(events);
+     Ok(model)
+ }
+ 
+@@ -131,15 +145,7 @@ pub fn evaluate(model: &Model, candidate: &Candidate, work: &mut Work<'_>) -> Ev
+         .iter()
+         .map(|_| ResourceState::default())
+         .collect();
+-    let mut events = BinaryHeap::new();
+-    // Order at a tick: completions, closure ends, closure starts, releases, wakes.
+-    for (i, train) in model.trains.iter().enumerate() {
+-        events.push(Reverse((train.release, 3, i)));
+-    }
+-    for (i, c) in model.closures.iter().enumerate() {
+-        events.push(Reverse((c.start, 2, i)));
+-        events.push(Reverse((c.end, 1, i)));
+-    }
++    let mut events = model.initial_events.clone();
+     let mut intervals = Vec::new();
+     let mut completed = 0;
+     let mut time = 0;
+-- 
+2.51.1
+

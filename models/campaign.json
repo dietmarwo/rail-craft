@@ -1,0 +1,90 @@
+{
+  "scenarios": [
+    {
+      "id": "nominal",
+      "model": {
+        "horizon": 100,
+        "resources": [
+          {
+            "name": "west siding",
+            "clearance": 1
+          },
+          {
+            "name": "east siding",
+            "clearance": 1
+          },
+          {
+            "name": "central block",
+            "clearance": 1
+          },
+          {
+            "name": "east platform",
+            "clearance": 1
+          },
+          {
+            "name": "west platform",
+            "clearance": 1
+          }
+        ],
+        "trains": [
+          {
+            "name": "eastbound",
+            "release": 0,
+            "planned": 10,
+            "priority": 0,
+            "route": [
+              {
+                "resource": 0,
+                "duration": 1
+              },
+              {
+                "resource": 2,
+                "duration": 4
+              },
+              {
+                "resource": 3,
+                "duration": 3
+              }
+            ]
+          },
+          {
+            "name": "westbound",
+            "release": 0,
+            "planned": 10,
+            "priority": 4,
+            "route": [
+              {
+                "resource": 1,
+                "duration": 1
+              },
+              {
+                "resource": 2,
+                "duration": 4
+              },
+              {
+                "resource": 4,
+                "duration": 3
+              }
+            ]
+          }
+        ],
+        "closures": [
+          {
+            "resource": 2,
+            "start": 1,
+            "end": 5
+          }
+        ]
+      }
+    }
+  ],
+  "candidates": [
+    {
+      "id": "baseline",
+      "parameters": [
+        1,
+        0
+      ]
+    }
+  ]
+}

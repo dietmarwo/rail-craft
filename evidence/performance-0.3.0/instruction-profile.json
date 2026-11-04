@@ -1,0 +1,52 @@
+{
+  "tool": "valgrind callgrind 3.22 (instruction counts, Ir)",
+  "binary": "0.3.0 examples/performance with debug info",
+  "note": "Counts include process start, fixture parsing and warm-up. Shares compare inclusive instruction counts of named functions; domain::evaluate includes the verifier (validate_with).",
+  "profiles": {
+    "serial-matrix": {
+      "program_instructions": 3627291,
+      "domain_evaluate_inclusive": 2466668,
+      "verifier_inclusive": 567733,
+      "verifier_share_of_domain_evaluate": 0.2302,
+      "domain_evaluate_share_of_program": 0.68,
+      "score_matrix_inclusive": 2536329,
+      "domain_evaluate_share_of_api_call": 0.9725
+    },
+    "domain-matrix": {
+      "program_instructions": 80338329,
+      "domain_evaluate_inclusive": 76173661,
+      "verifier_inclusive": 4811780,
+      "verifier_share_of_domain_evaluate": 0.0632,
+      "domain_evaluate_share_of_program": 0.9482,
+      "score_matrix_inclusive": 76221383,
+      "domain_evaluate_share_of_api_call": 0.9994
+    },
+    "domain2-matrix": {
+      "program_instructions": 81119355,
+      "domain_evaluate_inclusive": 73953469,
+      "verifier_inclusive": 7265350,
+      "verifier_share_of_domain_evaluate": 0.0982,
+      "domain_evaluate_share_of_program": 0.9117,
+      "score_matrix_inclusive": 74000901,
+      "domain_evaluate_share_of_api_call": 0.9994
+    },
+    "serial-full": {
+      "program_instructions": 7007313,
+      "domain_evaluate_inclusive": 3375695,
+      "verifier_inclusive": 567763,
+      "verifier_share_of_domain_evaluate": 0.1682,
+      "domain_evaluate_share_of_program": 0.4817,
+      "evaluate_json_inclusive": 5693816,
+      "domain_evaluate_share_of_api_call": 0.5929
+    },
+    "serial-lean": {
+      "program_instructions": 5976185,
+      "domain_evaluate_inclusive": 2466817,
+      "verifier_inclusive": 567763,
+      "verifier_share_of_domain_evaluate": 0.2302,
+      "domain_evaluate_share_of_program": 0.4128,
+      "scores_json_inclusive": 4719026,
+      "domain_evaluate_share_of_api_call": 0.5227
+    }
+  }
+}

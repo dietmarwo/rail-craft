@@ -1,0 +1,1507 @@
+From 054c87fddc0b2f5dfcadddf363c2585785a2cc5d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 12:56:12 -0400
+Subject: [PATCH 12/15] Prepare the 0.3.0 release
+
+Bump the version to 0.3.0, give the crate and source distribution an
+explicit file list, and rewrite the architecture guide for the 0.3.0
+code with a measured performance section. Record the release-candidate
+checks: Rust checks, CLI request, capabilities, native sweep,
+independent validation, installed wheel, tutorial and manual blocks,
+campaign replay, SciPy search and the installed Python optimization
+timings; keep the 0.2.0 copies under evidence/release-0.2.0. Seed the
+CMA-ES example's sampler so its output is reproducible.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Cargo.lock                                    |   2 +-
+ Cargo.toml                                    |  27 +-
+ docs/architecture.md                          | 386 +++++++++---
+ evidence/campaign-replay.json                 |   2 +-
+ evidence/capabilities.json                    |   2 +-
+ evidence/cli.json                             |   2 +-
+ evidence/installed.json                       |  18 +-
+ .../python-optimization.json                  | 548 ++++++++++++++++++
+ evidence/release-0.2.0/campaign-replay.json   |   1 +
+ evidence/release-0.2.0/capabilities.json      |   1 +
+ evidence/release-0.2.0/cli.json               |   1 +
+ evidence/release-0.2.0/installed.json         |  23 +
+ evidence/release-0.2.0/native-sweep.json      |   1 +
+ evidence/release-0.2.0/scipy-search.json      |  14 +
+ evidence/release-0.2.0/tutorial-check.json    |   5 +
+ evidence/release-0.2.0/validation.json        | 109 ++++
+ evidence/release-0.3.0/rust-checks.txt        |  22 +
+ evidence/scipy-search.json                    |  15 +-
+ evidence/tutorial-check.json                  |   6 +-
+ examples/python/README.md                     |   3 +
+ examples/python/optimize_fcmaes_cmaes.py      |  11 +-
+ .../python/outputs/optimize_fcmaes_cmaes.txt  |   5 +-
+ examples/python/outputs/policy_grid.txt       |   2 +-
+ pyproject.toml                                |   2 +-
+ validation/release_checks.py                  |  10 +-
+ 25 files changed, 1095 insertions(+), 123 deletions(-)
+ create mode 100644 evidence/performance-0.3.0/python-optimization.json
+ create mode 100644 evidence/release-0.2.0/campaign-replay.json
+ create mode 100644 evidence/release-0.2.0/capabilities.json
+ create mode 100644 evidence/release-0.2.0/cli.json
+ create mode 100644 evidence/release-0.2.0/installed.json
+ create mode 100644 evidence/release-0.2.0/native-sweep.json
+ create mode 100644 evidence/release-0.2.0/scipy-search.json
+ create mode 100644 evidence/release-0.2.0/tutorial-check.json
+ create mode 100644 evidence/release-0.2.0/validation.json
+ create mode 100644 evidence/release-0.3.0/rust-checks.txt
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 77733f0..67073bb 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -169,7 +169,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "rail-craft"
+-version = "0.2.0"
++version = "0.3.0"
+ dependencies = [
+  "pyo3",
+  "serde",
+diff --git a/Cargo.toml b/Cargo.toml
+index 53932e7..6af33c8 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,10 +1,35 @@
+ [package]
+ name = "rail-craft"
+-version = "0.2.0"
++version = "0.3.0"
+ edition = "2024"
+ rust-version = "1.88"
+ description = "Bounded rail-craft research evaluator"
+ license = "MIT"
++# Source archives carry the code, docs, examples, models, validation scripts and the small
++# validation evidence; release packages, patches and timing evidence stay out.
++include = [
++  "/.gitignore",
++  "/Cargo.lock",
++  "/Cargo.toml",
++  "/LICENSE",
++  "/README.md",
++  "/pyproject.toml",
++  "/src/**/*.rs",
++  "/examples/**/*.rs",
++  "/examples/**/*.py",
++  "/examples/**/*.md",
++  "/examples/**/*.txt",
++  "/docs/*.md",
++  "/models/*.json",
++  "/python/**/*.py",
++  "/python/**/*.json",
++  "/validation/*.py",
++  "/evidence/installed.json",
++  "/evidence/native-sweep.json",
++  "/evidence/occupancy.svg",
++  "/evidence/scipy-search.json",
++  "/evidence/validation.json",
++]
+ 
+ [lib]
+ crate-type = ["rlib", "cdylib"]
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 357ed40..9360ef9 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -1,106 +1,332 @@
+ # Rail Craft architecture
+ 
+-Version 0.2.0. Evaluate dispatch weights for fixed routes through capacity-one resources with entry closures and clearance.
++Version 0.3.0. Evaluate dispatch weights for fixed routes through capacity-one resources
++with entry closures and clearance. The [user manual](user-manual.md) documents every input
++and API; this guide describes how evaluation works internally and what it costs.
+ 
+ ## Evaluation pipeline
+ 
+ ```mermaid
+ flowchart TD
+-    P["Prepared model"] --> B["Candidate batch"]
+-    B --> V["Validate IDs and budgets"]
+-    V -->|Single worker or candidate| S["Inline evaluation"]
+-    V -->|Multiple workers| W["Scoped worker evaluation"]
+-    S --> D["Domain kernel and work counter"]
++    P["Prepared model and scratch pool"] --> J["JSON candidate batch"]
++    P --> M["Row-major parameter matrix"]
++    J --> V["Validate IDs, sizes and budget"]
++    M --> W["Validate shape and budget"]
++    V --> D["Dispatch: inline, or caller plus scoped workers"]
+     W --> D
+-    D --> R["Ordered typed result"]
+-    R -->|Full| F["Metrics and optional trace"]
+-    R -->|Lean| L["Score and status"]
++    D --> K["Domain kernel, verifier and work counter (pooled scratch)"]
++    K --> R["Ordered typed records"]
++    K --> S["Ordered MatrixScore rows"]
++    R -->|Full| F["Raw metrics JSON and optional trace"]
++    R -->|Lean| L["Score, status, steps and detail"]
+ ```
+ 
+ | Boundary | Location | Responsibility |
+ | --- | --- | --- |
+ | Request and CLI | `src/main.rs`, `src/lib.rs`, `models/request.json` | Versioned request schema, exact model-byte hash, typed validation, JSON output and exit code |
+-| Python boundary | `python/rail_craft/__init__.py`, PyO3 in `src/lib.rs` | Encode once per batch, release the Python GIL during native evaluation, decode the typed result envelope |
+-| Prepared engine | `src/lib.rs` | Own immutable domain data, enforce batch rules, dispatch candidates and retain ordered result rows |
+-| Domain | `src/domain.rs` | Bind the candidate, execute model logic, classify status and compute a minimization objective |
++| Python boundary | `python/rail_craft/__init__.py`, PyO3 in `src/lib.rs` | Encode once per batch (JSON paths) or extract rows (matrix path), release the GIL during native evaluation, decode the typed result |
++| Prepared engine | `src/lib.rs` | Own immutable domain data and the scratch pool, enforce batch rules, dispatch candidates and keep results in input order |
++| Domain | `src/domain.rs` | Bind the candidate, run the dispatch simulation, verify the trace, classify status and compute the minimization objective |
+ | Campaign | `python/rail_craft/campaign.py` | Local SQLite replay, attempt journal and complete-result caching |
+ | Verification | `validation/`, `examples/`, `evidence/` | Independent checks, executable examples and paired performance observations |
+ 
+ ## Data and execution contracts
+ 
+-`Prepared::new` hashes the model bytes, deserializes the model and
+-validates its bounds before building domain caches. The Python
+-wrapper encodes models with sorted keys and finite JSON numbers.
+-Two inputs that differ in their serialized representation can
+-have different provenance hashes. Result and request schema tags
+-remain at 0.1. Package version is reported separately.
+-
+-Every batch validates candidate count (1–4096), unique IDs, parameter
+-vector length (up to 64), requested workers (1–64) and trace count
+-(up to 16). Parallel workers claim indexes through an atomic cursor.
+-Each assigned index owns a result slot written once. After workers
+-join, output is serialized in input order. Single-worker or singleton
+-calls run inline. The typed prepared envelope borrows candidate IDs
+-until serialization completes. The CLI retains its full `Value` API.
+-
+-`Work` counts domain-defined steps per candidate. Its fast branch
+-handles unmonitored steps below the limit. Monitored steps check
+-the cancel file, then batch deadline, then work budget. Domain
+-checks can still reject an invalid candidate before it takes a step.
+-Cancellation and deadlines are cooperative. The wall clock can
+-change which candidates finish, while fixed-work replays should agree
+-independent of worker count. Candidate parallelism creates scoped
+-threads per batch. Concurrent callers should account for total
+-worker demand when choosing batch settings.
+-
+-Full records contain domain metrics and any requested trace.
+-`scores_json` in Rust and `Prepared.scores` in Python return the
+-same record keys with null metrics and reject traced candidates.
+-Both retain per-candidate limits, diagnostics needed for feasibility,
+-numeric score checks and failure status. Full replay restores
+-inspection details for the selected candidate.
++`Prepared::new` hashes the model bytes, deserializes the model and validates its bounds
++before building the prepared domain data. The Python wrapper encodes models with sorted
++keys and finite JSON numbers. Two inputs that differ in their serialized representation
++can have different provenance hashes. Result and request schema tags remain at 0.1; the
++package version is reported separately. `Prepared::model_sha256` exposes the hash to Rust
++callers.
++
++Every JSON batch validates candidate count (1 to 4,096), unique IDs (1 to 128 bytes),
++parameter vector length (up to 64), requested workers (1 to 64), step budget, deadline and
++trace count (up to 16). All batches share one dispatch routine. With one worker or one
++candidate, evaluation runs inline on the calling thread. Otherwise the calling thread and
++`min(workers, candidates) - 1` scoped threads claim indexes through an atomic cursor, so
++`min(workers, candidates)` evaluators run concurrently. Each index owns a result slot
++written once, and results are assembled in input order after the threads join. The typed
++envelope borrows candidate IDs until serialization completes. The CLI keeps its
++`Value`-based request path.
++
++`Work` counts domain-defined steps per candidate. Its fast branch handles unmonitored
++steps below the limit. When `wall_ms` or `cancel_file` is set, every step takes the
++monitored branch, which checks the cancel file, then the batch deadline, then the work
++budget. Domain checks can reject an invalid candidate before it takes a step.
++Cancellation and deadlines are cooperative. The wall clock can change which candidates
++finish, while fixed-work replays agree for every worker count. Concurrent callers should
++account for total worker demand when choosing batch settings.
++
++Full records contain domain metrics and any requested trace. `scores_json` in Rust and
++`Prepared.scores` in Python return the same record keys with null metrics and reject
++traced candidates. Both keep per-candidate limits, the full feasibility audit, numeric
++score checks and failure status. Full replay restores inspection details for the
++selected candidate.
++
++### Typed score matrix
++
++`Prepared::score_matrix(rows, parameters, budget)` evaluates untraced candidates stored
++row-major in one `f64` slice and returns one `MatrixScore { status, steps, score }` per
++row. It parses only the budget JSON. It rejects row counts outside 1 to 4,096, a buffer
++whose length is not a multiple of `rows`, and rows with more than 64 values; rows are
++numbered by position and carry no IDs. Budget limits, deadline, dispatch, cancellation and
++failure classification are the shared ones, and evaluation runs with metrics disabled,
++exactly like `scores_json`. Unit tests compare status, steps and score bits with
++`scores_json` for valid, invalid and infeasible rows, `max_steps` limits, a cancel file and
++several worker counts. The PyO3 method takes `Vec<Vec<f64>>`, rejects ragged rows,
++releases the GIL during evaluation and returns `(scores, statuses, steps)` with NaN for
++every row that is not complete; the Python wrapper converts 2-D NumPy arrays with
++`tolist()`.
++
++### Metrics encoding
++
++The domain builds metrics from typed structs whose fields are declared in sorted key
++order, encodes them once with `serde_json::value::to_raw_value` and stores the resulting
++`Box<RawValue>` in the record. The record serializer splices that raw JSON into the
++output. Before 0.3.0, metrics were `serde_json::Value` maps, which serialize their keys
++sorted; the typed field order reproduces those bytes, which a unit test checks for every
++metrics shape. `Work::metrics` builds nothing in lean and matrix evaluations.
++
++### Scratch pool
++
++All per-candidate buffers of the kernel and the verifier live in `domain::Scratch`: train
++and resource state, the contender table, ready masks, the event heap, the movement list
++and the verifier's slot and grouping buffers. Each buffer is reset before use, so one
++scratch serves any sequence of candidates and models. `Prepared` keeps a mutex-protected
++pool of at most 64 scratch sets. The inline caller and every worker take one at the start
++of a batch and return it at the end, so repeated single-candidate calls from an optimizer
++reuse warm buffers instead of allocating about a dozen vectors per call.
+ 
+ ## Domain internals
+ 
+ | State | Ownership |
+ | --- | --- |
+-| Routes, initial events and closure index | Immutable prepared corridor |
+-| Current events, resource owners and free-after ticks | Candidate-local mutable state |
+-| Ready-train bitset, next leg, held interval and arrival | Candidate-local mutable state |
+-| Interval audit | Reconstructed from completed movement records |
+-
+-A reverse binary heap orders by tick, event kind and stable index.
+-At each tick the engine applies service completions, closure ends,
+-closure starts, releases and clearance wakes before dispatch. It
+-then repeatedly picks the eligible train with highest weighted
+-priority plus waiting-age term, then earliest waiting time, then
+-input index. The engine clones the prepared release and closure heap
+-per candidate. Weighted priority is bound once for each train and
+-candidate. A 128-bit mask tracks ready trains in stable input order. Each selection pass ranks an eligible contender once.
+-
+-The independent verifier checks route continuity, entry closures,
+-duration, release, horizon and resource clearance. It sorts
+-intervals by train and resource. An immutable index merges
+-overlapping or adjacent half-open closures per resource and uses a
+-binary search for each entry. The engine still tracks individual
+-closure events and overlapping closure counts. Even the lean
+-objective path runs the complete interval audit. The synthetic
+-corridor models blocking and a fixed priority policy. Timetable
+-synthesis and train dynamics are outside the supported input.
++| Routes, static event timeline, merged closure index, leg offsets | Immutable prepared corridor |
++| Dynamic event heap, resource owners, free-after ticks, active closure counts | Candidate state in the scratch |
++| Per-resource ready masks, contender table, next leg, held movement and arrival | Candidate state in the scratch |
++| Movement list and verifier buffers | Candidate state in the scratch |
++
++**Events.** An event is a packed `u64` key `(tick << 12) | (kind << 9) | index`, whose
++unsigned order equals the `(tick, kind, index)` order. Ticks stay below 2^31 and indexes
++below 512, so keys are unique and never reach `u64::MAX`. Releases and closure starts and
++ends do not depend on the candidate; preparation sorts them once into a static timeline.
++Each candidate walks the timeline with a cursor and merges it with a binary heap that holds
++only service completions and clearance wakes, so the heap stays at most as large as the
++number of trains plus resources. At a tick, events are processed in the order completions,
++closure ends, closure starts, releases and clearance wakes. Every processed event is one
++step.
++
++**Dispatch.** Each resource has a 128-bit mask of the ready trains whose next leg uses it,
++and a further 128-bit mask marks the resources that have at least one ready train. A
++dispatch pass visits only those resources, checks each one's availability once (no owner,
++clearance elapsed, no active closure) and ranks only the trains waiting for available
++resources. Each ranking key is one `u128`: the high half maps the `f64` dispatch score to
++an unsigned integer with the order of `f64::total_cmp`, and the low half is a tail
++precomputed when the train became ready, which ranks an earlier waiting start and then a
++lower train index higher. The pass takes the unsigned maximum. Weighted priority, waiting
++start (as an exact `f64` integer) and tail live in one 128-entry contender table indexed by
++`train & 127`, so the ranking loop has no bounds checks. The pass repeats until no train is
++eligible; every dispatch is one step. A randomized unit test compares complete traced
++output, steps and work-limit points with the 0.2.0 dispatcher on random corridors from
++400 seeds, seven weight pairs and two step budgets.
++
++**Verifier.** The independent verifier checks route continuity, entry closures, run
++durations, release, horizon, capacity and clearance in three phases with fixed messages.
++Each movement first passes the per-movement checks: an immutable per-resource index of
++merged half-open closures answers the closure check with one binary search. The movement
++is then placed in a per-train leg slot found through prepared prefix offsets. Without a
++repeated slot, every train has all of its legs exactly when the movement count equals the
++total leg count. A stable counting pass groups movements by resource; a group is sorted by
++entry only when it is out of order. A randomized test compares verdicts and messages with
++the 0.2.0 verifier on corrupted traces. Even lean and matrix evaluations run the complete
++audit before reporting `complete`.
++
++**Limits.** Models have at most 128 trains and 128 resources, enforced by model
++validation since 0.1.0. The ready masks, the resource mask and the contender table depend
++on these limits; raising them would need wider masks.
++
++The synthetic corridor models blocking and a fixed priority policy. Timetable synthesis
++and train dynamics are outside the supported input.
+ 
+ ## Persistence and boundaries of evidence
+ 
+-The local campaign hashes the installed extension bytes plus each
+-scenario, model, candidate and work settings to locate reusable
+-records. SQLite stores completed, invalid and infeasible results,
+-and keeps an append-only journal of attempts. Cancelled or time-
+-limited attempts remain in the journal and can be retried. SQLite
+-commits each chunk atomically. A new extension build changes the
+-cache namespace. The current workflow is local and exposes no
+-distributed worker protocol.
+-
+-The package contains source, a source distribution, and a validated
+-Linux x86-64 wheel. The included performance log distinguishes the
+-native prepared boundary, complete Python search and clean build.
+-See the [tutorial](tutorial.md) for exact commands and
+-[the model card](model.md) for equations and research scope.
++The local campaign hashes the installed extension bytes plus each scenario, model,
++candidate and work settings to locate reusable records. SQLite stores completed, invalid
++and infeasible results, and keeps an append-only journal of attempts. Cancelled or
++time-limited attempts remain in the journal and can be retried. SQLite commits each chunk
++atomically. A new extension build changes the cache namespace. The current workflow is
++local and exposes no distributed worker protocol.
++
++The package contains source, a source distribution, and a validated Linux x86-64 wheel.
++The [0.3.0 performance log](../rail-craft-performance-log-0.3.0.md) distinguishes the
++native prepared boundary, complete Python search and clean build. See the
++[tutorial](tutorial.md) for exact commands and [the model card](model.md) for equations
++and research scope.
++
++## Performance
++
++All numbers in this section were measured for this release on one host: 2 vCPUs, Intel(R)
++Xeon(R) Processor @ 2.10GHz (KVM guest), Rust 1.97.0, CPython 3.12.3. They are not
++comparable with the 0.2.0 log's figures, which came from an AMD EPYC 9V74 host with
++4 CPUs and Rust 1.88. Five independent projects shared the host; every timing ran under
++a shared CPU lock so that no build or other benchmark overlapped it.
++
++### 0.2.0 compared with 0.3.0
++
++`validation/performance_pair.py` ran the 0.2.0 benchmark binary (built from the import
++commit) against the round-10 binary with 11 alternating samples per side. Each sample is
++a fresh process that excludes start-up and preparation, warms up the prepared evaluator
++and reports the mean time per call over the workload's repeats. The paired script also
++checks that both sides produce semantically identical records. Rows marked "baseline:
++0.2.0 lean" compare 0.2.0 lean JSON scores with the 0.3.0 matrix API, because 0.2.0 has
++no matrix API. The `parallel` workload keeps its four workers on this 2-vCPU host.
++
++| Workload | Description | 0.2.0 ms | 0.3.0 ms | 0.2.0 / 0.3.0 |
++| --- | --- | ---: | ---: | ---: |
++| `one` | Single prepared evaluation, full record | 0.0019 | 0.0014 | 1.30x |
++| `serial` | 96 full records, one worker | 0.149 | 0.084 | 1.76x |
++| `parallel` | 96 full records, four workers | 0.365 | 0.200 | 1.82x |
++| `trace` | 12 traced records | 0.102 | 0.030 | 3.40x |
++| `invalid` | 1,024 invalid candidates | 1.504 | 1.468 | 1.02x |
++| `domain` | 48 domain cases (110 trains, one resource) | 3.742 | 1.011 | 3.70x |
++| `domain2` | 48 secondary cases (100 trains, 300 closures) | 4.398 | 0.954 | 4.61x |
++| lean `serial` | 96 lean scores | 0.113 | 0.071 | 1.59x |
++| lean `domain` | 48 lean domain scores | 3.388 | 0.839 | 4.04x |
++| lean `domain2` | 48 lean secondary scores | 4.339 | 0.901 | 4.82x |
++| matrix `serial` | 96 matrix rows (baseline: 0.2.0 lean) | 0.104 | 0.034 | 3.06x |
++| matrix `domain` | 48 matrix domain rows (baseline: 0.2.0 lean) | 3.458 | 0.899 | 3.84x |
++| lean `one` | One lean score (supplementary) | 0.0015 | 0.0011 | 1.32x |
++| matrix `one` | One matrix row (baseline: 0.2.0 lean, supplementary) | 0.0015 | 0.0005 | 3.01x |
++| matrix `domain2` | 48 matrix secondary rows (baseline: 0.2.0 lean, supplementary) | 4.498 | 0.881 | 5.10x |
++| matrix `parallel` | 96 matrix rows, four workers (baseline: 0.2.0 lean, supplementary) | 0.259 | 0.159 | 1.63x |
++
++Evidence: `evidence/performance-0.3.0/cumulative/*.json`. An earlier complete run of the
++same table is kept in `cumulative/run1/`; a host slowdown affected both sides during
++samples 1 to 8 of its matrix `domain` row, so the table was repeated once and the
++repeat is reported. Between the two runs, the ratios differ most for matrix `parallel`
++(2.13x and 1.63x) and lean `domain` (3.58x and 4.04x); every other row differs by at
++most 0.21. Treat differences of this size as run-to-run noise on a shared virtual host.
++
++### Where a call spends its time
++
++The benchmark's `breakdown` probe times, separately and on the same inputs, JSON decoding
++of the candidates and budget alone, the matrix API (evaluation without JSON), the lean JSON
++call and the full JSON call. Each value is the median of 11 loops
++(`evidence/performance-0.3.0/breakdown.json`, release binary, one worker except
++`parallel`). The two right-hand columns are differences of independent medians, so they
++are estimates; small negative values mean that the parts are within noise of each other.
++
++| Workload | Candidates | Decode us | Matrix us | Lean us | Full us | Lean - decode - matrix us | Full - lean us |
++| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
++| `one` | 1 | 0.24 | 0.49 | 1.19 | 1.40 | 0.46 | 0.21 |
++| `serial` | 96 | 19.38 | 37.21 | 74.71 | 95.07 | 18.12 | 20.36 |
++| `parallel` (4 workers) | 96 | 19.81 | 144.62 | 195.29 | 206.26 | 30.86 | 10.98 |
++| `trace` | 12 | 3.18 | n/a | n/a | 23.20 | n/a | n/a |
++| `invalid` | 1,024 | 1,185.37 | 18.70 | 1,347.25 | 1,330.45 | 143.18 | -16.80 |
++| `domain` | 48 | 7.06 | 895.84 | 888.26 | 931.64 | -14.64 | 43.38 |
++| `domain2` | 48 | 9.68 | 851.98 | 856.95 | 950.78 | -4.71 | 93.83 |
++
++"Lean - decode - matrix" is the cost of ID checks, record assembly and JSON encoding;
++"full - lean" is the cost of building and encoding metrics. Inside the evaluation,
++callgrind instruction counts (`evidence/performance-0.3.0/instruction-profile.json`)
++attribute the work of a matrix call as follows:
++
++| Matrix workload | Domain evaluation share of the call | Verifier share of domain evaluation |
++| --- | ---: | ---: |
++| `serial` (two trains, 21 steps) | 97.3% | 23.0% |
++| `domain` (110 trains) | 99.9% | 6.3% |
++| `domain2` (100 trains, 300 closures) | 99.9% | 9.8% |
++
++For the large cases the remaining domain time is the event loop and the dispatch ranking.
++
++### Per-call cost of the three APIs
++
++Per candidate, from the same breakdown (us):
++
++| Workload | Matrix | Lean | Full |
++| --- | ---: | ---: | ---: |
++| `one` (single call) | 0.495 | 1.188 | 1.396 |
++| `serial` (96 per call) | 0.388 | 0.778 | 0.990 |
++| `domain` (48 per call) | 18.663 | 18.505 | 19.409 |
++| `domain2` (48 per call) | 17.750 | 17.853 | 19.808 |
++| `invalid` (1,024 per call, 63 parameters each) | 0.018 | 1.316 | 1.299 |
++
++For small models the matrix API halves the cost per candidate against lean JSON records
++and is 2.8 times cheaper than full records for a single call. For large models, simulation
++dominates and the APIs differ by at most 12%. JSON decoding of many parameters is
++expensive: the `invalid` batch spends 1.19 ms of 1.33 ms decoding 64,512 numbers, which
++the matrix API avoids.
++
++### Worker scaling
++
++Median time per call over 11 alternating process runs per worker count
++(`evidence/performance-0.3.0/worker-scaling.json`, `CRAFT_WORKERS` override), in ms:
++
++| Workload | API | 1 worker | 2 workers | 4 workers | 8 workers |
++| --- | --- | ---: | ---: | ---: | ---: |
++| `serial` | full | 0.095 | 0.151 | 0.210 | 0.473 |
++| `serial` | lean | 0.073 | 0.137 | 0.218 | 0.465 |
++| `serial` | matrix | 0.037 | 0.085 | 0.171 | 0.309 |
++| `domain` | full | 1.122 | 0.648 | 0.804 | 1.104 |
++| `domain` | lean | 0.969 | 0.578 | 0.659 | 0.871 |
++| `domain` | matrix | 0.866 | 0.556 | 0.556 | 0.708 |
++| `domain2` | full | 0.869 | 0.533 | 0.598 | 0.769 |
++| `domain2` | lean | 0.925 | 0.606 | 0.722 | 0.821 |
++| `domain2` | matrix | 0.921 | 0.633 | 0.652 | 0.879 |
++
++Two workers give 1.45 to 1.73 times the single-worker throughput on the large cases,
++close to what 2 vCPUs allow after thread start-up. For the 96 small candidates (about 37 us of
++work), every extra thread costs more than it saves. Workers beyond the CPU count only add
++start-up and contention.
++
++### Monitored budgets
++
++`wall_ms` and `cancel_file` switch every step to the monitored branch
++(`evidence/performance-0.3.0/budget-monitoring.json`, installed development wheel,
++`score_matrix` with one worker, median us per call of 96 rows):
++
++| Model | Steps per row | Default | `wall_ms=60000` | `cancel_file` (absent file) |
++| --- | ---: | ---: | ---: | ---: |
++| Example, two trains | 21 | 54.1 | 117.6 | 766.4 |
++| 16-train corridor | 159 | 288.2 | 879.5 | 5,955.1 |
++
++With a clock read per step a call takes 2 to 3 times as long, and with a file-system
++check per step 14 to 21 times as long.
++
++### Installed Python optimization
++
++`validation/optimize_performance.py` runs SciPy differential evolution (seed 17, 16
++objective calls) and a traced replay of the winner, pinned to one logical CPU with
++`taskset -c 0`. Each configuration ran 7 times in an interleaved order; the 0.3.0 wheel was
++built from the extracted source distribution and each wheel was installed in its own
++fresh CPython 3.12 environment with NumPy 2.3.5 and SciPy 1.17.0. Times exclude Python
++imports. The total median is computed per run
++(`evidence/performance-0.3.0/python-optimization.json`).
++
++| Configuration | Prepare ms | Search ms | Replay ms | Total ms | v0.2.0-full / total |
++| --- | ---: | ---: | ---: | ---: | ---: |
++| v0.2.0-full | 0.099 | 3.428 | 0.050 | 3.572 | 1.00x |
++| v0.2.0-scores | 0.098 | 3.393 | 0.052 | 3.544 | 1.01x |
++| v0.3.0-full | 0.095 | 3.280 | 0.039 | 3.476 | 1.03x |
++| v0.3.0-scores | 0.093 | 3.359 | 0.043 | 3.495 | 1.02x |
++| v0.3.0-matrix | 0.094 | 2.999 | 0.065 | 3.164 | 1.13x |
++
++All 35 runs made 16 evaluations with 0 failures, selected
++`[0.9178665376954516, 0.004332725510795259]` and replayed score 17. The search costs about
++0.2 ms per objective call, while a native evaluation costs about 1.4 us: SciPy's own
++bookkeeping dominates this short run. The matrix mode removes the JSON encoding and
++decoding in Python and saves about 18 us per call. Its replay is the process's first JSON
++call and includes that path's first-use cost.
++
++### What dominates now and which API to use
++
++- Large models (about 100 trains): the event loop and the dispatch ranking take 90% to
++  94% of the evaluation and the verifier 6% to 10%; the API choice changes the cost by at
++  most 12%. Use two workers on this 2-vCPU host for batches of a few dozen candidates or more.
++- Small models: per-candidate kernel cost is below half a microsecond, so JSON decoding,
++  record encoding and thread start-up dominate. Use `score_matrix` with one worker.
++- Optimizers: use `score_matrix`, pass whole populations where the optimizer allows it,
++  keep `cancel_file` and `wall_ms` out of the objective, and replay the winner with
++  `evaluate(..., trace=True)`.
++- Many parameters per candidate through JSON: decoding dominates; the matrix API avoids it.
++- Use `batch` only when the metrics of every candidate are needed, and trace only replays.
+diff --git a/evidence/campaign-replay.json b/evidence/campaign-replay.json
+index 5e162a3..ff464b2 100644
+--- a/evidence/campaign-replay.json
++++ b/evidence/campaign-replay.json
+@@ -1 +1 @@
+-[{"build_sha256": "f0aa2051b1049085465ecf14a0f740aeb923a76a628503493e48a05d470561fc", "key": "a1c01187536a6bf4671095bc08eef52aa44f0d26260a60eeee667a55be589147", "model_sha256": "d39e3ad773e28ab9ef538179f6ea1b7b3efd2904324e45b6725788e9b574d835", "record": {"detail": null, "id": "baseline", "metrics": {"completed": 2, "delays": [7, 2], "intervals": null, "max_delay": 7}, "score": 17.0, "status": "complete", "steps": 21}, "scenario": "nominal"}]
++[{"build_sha256": "bc3f19978b2813d38f377fd5a8bd1ef7dc1beee229cd6023e8f6e4b9a039c3de", "key": "3b2debd77e0798a45e987f286382e22d50baecd5cb59f9c930431a55d1bd7e80", "model_sha256": "d39e3ad773e28ab9ef538179f6ea1b7b3efd2904324e45b6725788e9b574d835", "record": {"detail": null, "id": "baseline", "metrics": {"completed": 2, "delays": [7, 2], "intervals": null, "max_delay": 7}, "score": 17.0, "status": "complete", "steps": 21}, "scenario": "nominal"}]
+diff --git a/evidence/capabilities.json b/evidence/capabilities.json
+index b068f3a..6badfb6 100644
+--- a/evidence/capabilities.json
++++ b/evidence/capabilities.json
+@@ -1 +1 @@
+-{"batch":true,"models":["integer_tick_fixed_routes","blocking_capacity_one","entry_closures","trace_validation"],"schema":"rail-craft.capabilities/0.1","version":"0.2.0","worker_limit":64}
++{"batch":true,"models":["integer_tick_fixed_routes","blocking_capacity_one","entry_closures","trace_validation"],"schema":"rail-craft.capabilities/0.1","version":"0.3.0","worker_limit":64}
+diff --git a/evidence/cli.json b/evidence/cli.json
+index 0fb27d2..884acb0 100644
+--- a/evidence/cli.json
++++ b/evidence/cli.json
+@@ -1 +1 @@
+-{"model_sha256":"898de4347d03524411fdf46ef144917c44608bb10516a65535301fc79dc53bc5","records":[{"detail":null,"id":"example","metrics":{"completed":2,"delays":[7,2],"intervals":[{"entry":0,"exit":5,"leg":0,"resource":1,"service_end":1,"train":1},{"entry":5,"exit":9,"leg":1,"resource":2,"service_end":9,"train":1},{"entry":0,"exit":10,"leg":0,"resource":0,"service_end":1,"train":0},{"entry":9,"exit":12,"leg":2,"resource":4,"service_end":12,"train":1},{"entry":10,"exit":14,"leg":1,"resource":2,"service_end":14,"train":0},{"entry":14,"exit":17,"leg":2,"resource":3,"service_end":17,"train":0}],"max_delay":7},"score":17.0,"status":"complete","steps":21}],"schema":"rail-craft.result/0.1","version":"0.2.0"}
++{"model_sha256":"898de4347d03524411fdf46ef144917c44608bb10516a65535301fc79dc53bc5","records":[{"detail":null,"id":"example","metrics":{"completed":2,"delays":[7,2],"intervals":[{"entry":0,"exit":5,"leg":0,"resource":1,"service_end":1,"train":1},{"entry":5,"exit":9,"leg":1,"resource":2,"service_end":9,"train":1},{"entry":0,"exit":10,"leg":0,"resource":0,"service_end":1,"train":0},{"entry":9,"exit":12,"leg":2,"resource":4,"service_end":12,"train":1},{"entry":10,"exit":14,"leg":1,"resource":2,"service_end":14,"train":0},{"entry":14,"exit":17,"leg":2,"resource":3,"service_end":17,"train":0}],"max_delay":7},"score":17.0,"status":"complete","steps":21}],"schema":"rail-craft.result/0.1","version":"0.3.0"}
+diff --git a/evidence/installed.json b/evidence/installed.json
+index fe3150b..6f996e5 100644
+--- a/evidence/installed.json
++++ b/evidence/installed.json
+@@ -6,18 +6,18 @@
+   "introductory_score": 17.0,
+   "batch_candidates": 96,
+   "cold_prepare_and_run_seconds": [
+-    0.0006147140011307783,
+-    0.0004094949981663376,
+-    0.00039615599962417036
++    0.000682550999954401,
++    0.00043928400009463076,
++    0.0003493840004011872
+   ],
+   "prepared_worker_1_seconds": [
+-    0.00029852900479454547,
+-    0.0002856989958672784,
+-    0.0003363049981999211
++    0.0002575190001152805,
++    0.0002577340001153061,
++    0.00026561200047581224
+   ],
+   "prepared_worker_4_seconds": [
+-    0.00037534400325967,
+-    0.00048525899910600856,
+-    0.0004722600060631521
++    0.0004209930002616602,
++    0.0004342679994806531,
++    0.0004543349996311008
+   ]
+ }
+diff --git a/evidence/performance-0.3.0/python-optimization.json b/evidence/performance-0.3.0/python-optimization.json
+new file mode 100644
+index 0000000..ea36a1a
+--- /dev/null
++++ b/evidence/performance-0.3.0/python-optimization.json
+@@ -0,0 +1,548 @@
++{
++  "host": "2 vCPUs, Intel(R) Xeon(R) Processor @ 2.10GHz (KVM), CPython 3.12.3, SciPy 1.17.0, NumPy 2.3.5, taskset -c 0",
++  "method": "7 runs per configuration, configurations interleaved in rotating order; medians per column, total median per run",
++  "agreement": {
++    "all_configurations_agree": true,
++    "evaluations": 16,
++    "failures": 0,
++    "best": [
++      0.9178665376954516,
++      0.004332725510795259
++    ],
++    "score": 17.0
++  },
++  "medians_seconds": {
++    "v0.2.0-full": {
++      "prepare_seconds": 9.898600001179148e-05,
++      "search_seconds": 0.0034283619997950154,
++      "replay_seconds": 4.981700021744473e-05,
++      "total_seconds": 0.003572055999939039
++    },
++    "v0.2.0-scores": {
++      "prepare_seconds": 9.812900043471018e-05,
++      "search_seconds": 0.0033928860002561123,
++      "replay_seconds": 5.198799954087008e-05,
++      "total_seconds": 0.0035444840004856815
++    },
++    "v0.3.0-full": {
++      "prepare_seconds": 9.521399988443591e-05,
++      "search_seconds": 0.0032801789993754937,
++      "replay_seconds": 3.936600023735082e-05,
++      "total_seconds": 0.0034761169999910635
++    },
++    "v0.3.0-scores": {
++      "prepare_seconds": 9.286800013796892e-05,
++      "search_seconds": 0.0033593379994272254,
++      "replay_seconds": 4.3449000258988235e-05,
++      "total_seconds": 0.003495492000183731
++    },
++    "v0.3.0-matrix": {
++      "prepare_seconds": 9.373400007461896e-05,
++      "search_seconds": 0.0029989509994265973,
++      "replay_seconds": 6.524000036733923e-05,
++      "total_seconds": 0.003164044999721227
++    }
++  },
++  "runs": {
++    "v0.2.0-full": [
++      {
++        "mode": "full",
++        "total_seconds": 0.00383289599994896,
++        "prepare_seconds": 9.764100013853749e-05,
++        "search_seconds": 0.003681278999465576,
++        "replay_seconds": 5.39760003448464e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "full",
++        "total_seconds": 0.0035050659998887568,
++        "prepare_seconds": 0.00013414299974101596,
++        "search_seconds": 0.003328605000206153,
++        "replay_seconds": 4.2317999941587914e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "full",
++        "total_seconds": 0.006145264000224415,
++        "prepare_seconds": 0.00012890900052298093,
++        "search_seconds": 0.005947833999925933,
++        "replay_seconds": 6.852099977550097e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "full",
++        "total_seconds": 0.003320302999782143,
++        "prepare_seconds": 0.00010222799937764648,
++        "search_seconds": 0.003168258000187052,
++        "replay_seconds": 4.981700021744473e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "full",
++        "total_seconds": 0.003983317999882274,
++        "prepare_seconds": 9.105099979933584e-05,
++        "search_seconds": 0.003836111000055098,
++        "replay_seconds": 5.615600002784049e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "full",
++        "total_seconds": 0.003572055999939039,
++        "prepare_seconds": 9.898600001179148e-05,
++        "search_seconds": 0.0034283619997950154,
++        "replay_seconds": 4.470800013223197e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "full",
++        "total_seconds": 0.0035533280006347923,
++        "prepare_seconds": 9.404400043422356e-05,
++        "search_seconds": 0.003412416999708512,
++        "replay_seconds": 4.686700049205683e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      }
++    ],
++    "v0.2.0-scores": [
++      {
++        "mode": "scores",
++        "total_seconds": 0.0036938129996997304,
++        "prepare_seconds": 9.768699965206906e-05,
++        "search_seconds": 0.003539156999977422,
++        "replay_seconds": 5.696900007023942e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "scores",
++        "total_seconds": 0.0035444840004856815,
++        "prepare_seconds": 0.00010127099994861055,
++        "search_seconds": 0.0033928860002561123,
++        "replay_seconds": 5.03270002809586e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "scores",
++        "total_seconds": 0.0033049389994630474,
++        "prepare_seconds": 9.951500032912008e-05,
++        "search_seconds": 0.0031593109997629654,
++        "replay_seconds": 4.6112999370961916e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "scores",
++        "total_seconds": 0.0038313830000333837,
++        "prepare_seconds": 0.00010943899997073459,
++        "search_seconds": 0.003664550000394229,
++        "replay_seconds": 5.739399966842029e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "scores",
++        "total_seconds": 0.0032909219999055495,
++        "prepare_seconds": 8.784400051808916e-05,
++        "search_seconds": 0.0031511790002696216,
++        "replay_seconds": 5.1898999117838684e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "scores",
++        "total_seconds": 0.003392065999832994,
++        "prepare_seconds": 9.034800041263225e-05,
++        "search_seconds": 0.0032497299998794915,
++        "replay_seconds": 5.198799954087008e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "scores",
++        "total_seconds": 0.004369307000160916,
++        "prepare_seconds": 9.812900043471018e-05,
++        "search_seconds": 0.004207444999337895,
++        "replay_seconds": 6.373300038831076e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      }
++    ],
++    "v0.3.0-full": [
++      {
++        "mode": "full",
++        "total_seconds": 0.003658746999462892,
++        "prepare_seconds": 9.521399988443591e-05,
++        "search_seconds": 0.003525502999764285,
++        "replay_seconds": 3.802999981417088e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "full",
++        "total_seconds": 0.0034761169999910635,
++        "prepare_seconds": 0.0001551590003145975,
++        "search_seconds": 0.0032801789993754937,
++        "replay_seconds": 4.077900030097226e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "full",
++        "total_seconds": 0.0033535100001245155,
++        "prepare_seconds": 8.968499969341792e-05,
++        "search_seconds": 0.0032282540005326155,
++        "replay_seconds": 3.5570999898482114e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "full",
++        "total_seconds": 0.0037149400004636846,
++        "prepare_seconds": 9.75580005615484e-05,
++        "search_seconds": 0.0035780159996647853,
++        "replay_seconds": 3.936600023735082e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "full",
++        "total_seconds": 0.0033253020001211553,
++        "prepare_seconds": 8.911999975680374e-05,
++        "search_seconds": 0.0031752000004416914,
++        "replay_seconds": 6.098199992266018e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "full",
++        "total_seconds": 0.005455413000163389,
++        "prepare_seconds": 0.00014610299967898754,
++        "search_seconds": 0.005248711000604089,
++        "replay_seconds": 6.0598999880312476e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "full",
++        "total_seconds": 0.003308560000732541,
++        "prepare_seconds": 9.14330003070063e-05,
++        "search_seconds": 0.003181299000061699,
++        "replay_seconds": 3.58280003638356e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      }
++    ],
++    "v0.3.0-scores": [
++      {
++        "mode": "scores",
++        "total_seconds": 0.0033978350002143998,
++        "prepare_seconds": 9.570200018060859e-05,
++        "search_seconds": 0.003258911999182601,
++        "replay_seconds": 4.322100085119018e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "scores",
++        "total_seconds": 0.0032232960002147593,
++        "prepare_seconds": 9.286800013796892e-05,
++        "search_seconds": 0.003085559000282956,
++        "replay_seconds": 4.486899979383452e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "scores",
++        "total_seconds": 0.0033773750001273584,
++        "prepare_seconds": 9.712200062494958e-05,
++        "search_seconds": 0.0031894269995973445,
++        "replay_seconds": 9.082599990506424e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "scores",
++        "total_seconds": 0.0036289119998400565,
++        "prepare_seconds": 8.929500017984537e-05,
++        "search_seconds": 0.0034878540000136127,
++        "replay_seconds": 5.176299964659847e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "scores",
++        "total_seconds": 0.003495492000183731,
++        "prepare_seconds": 9.279799996875226e-05,
++        "search_seconds": 0.0033593379994272254,
++        "replay_seconds": 4.3356000787753146e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "scores",
++        "total_seconds": 0.003762821999771404,
++        "prepare_seconds": 9.424000018043444e-05,
++        "search_seconds": 0.003625485999691591,
++        "replay_seconds": 4.309599989937851e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "scores",
++        "total_seconds": 0.003747229000509833,
++        "prepare_seconds": 8.381300085602561e-05,
++        "search_seconds": 0.003619966999394819,
++        "replay_seconds": 4.3449000258988235e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      }
++    ],
++    "v0.3.0-matrix": [
++      {
++        "mode": "matrix",
++        "total_seconds": 0.0034466070001144544,
++        "prepare_seconds": 0.00014856100005999906,
++        "search_seconds": 0.0032237690002148156,
++        "replay_seconds": 7.427699983963976e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "matrix",
++        "total_seconds": 0.0028112159998272546,
++        "prepare_seconds": 9.277400022256188e-05,
++        "search_seconds": 0.002653473000464146,
++        "replay_seconds": 6.496899914054666e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "matrix",
++        "total_seconds": 0.0029040709996479563,
++        "prepare_seconds": 9.083500026463298e-05,
++        "search_seconds": 0.002752442999735649,
++        "replay_seconds": 6.079299964767415e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "matrix",
++        "total_seconds": 0.0031876650000413065,
++        "prepare_seconds": 9.212500026478665e-05,
++        "search_seconds": 0.003018559999873105,
++        "replay_seconds": 7.697999990341486e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "matrix",
++        "total_seconds": 0.003164044999721227,
++        "prepare_seconds": 9.985399992729072e-05,
++        "search_seconds": 0.0029989509994265973,
++        "replay_seconds": 6.524000036733923e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "matrix",
++        "total_seconds": 0.003350009000314458,
++        "prepare_seconds": 9.373400007461896e-05,
++        "search_seconds": 0.0031870299999354756,
++        "replay_seconds": 6.92450003043632e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      },
++      {
++        "mode": "matrix",
++        "total_seconds": 0.0031037990002005245,
++        "prepare_seconds": 9.645600039220881e-05,
++        "search_seconds": 0.0029441309998219367,
++        "replay_seconds": 6.321199998637894e-05,
++        "evaluations": 16,
++        "failures": 0,
++        "best": [
++          0.9178665376954516,
++          0.004332725510795259
++        ],
++        "score": 17.0
++      }
++    ]
++  }
++}
+\ No newline at end of file
+diff --git a/evidence/release-0.2.0/campaign-replay.json b/evidence/release-0.2.0/campaign-replay.json
+new file mode 100644
+index 0000000..5e162a3
+--- /dev/null
++++ b/evidence/release-0.2.0/campaign-replay.json
+@@ -0,0 +1 @@
++[{"build_sha256": "f0aa2051b1049085465ecf14a0f740aeb923a76a628503493e48a05d470561fc", "key": "a1c01187536a6bf4671095bc08eef52aa44f0d26260a60eeee667a55be589147", "model_sha256": "d39e3ad773e28ab9ef538179f6ea1b7b3efd2904324e45b6725788e9b574d835", "record": {"detail": null, "id": "baseline", "metrics": {"completed": 2, "delays": [7, 2], "intervals": null, "max_delay": 7}, "score": 17.0, "status": "complete", "steps": 21}, "scenario": "nominal"}]
+diff --git a/evidence/release-0.2.0/capabilities.json b/evidence/release-0.2.0/capabilities.json
+new file mode 100644
+index 0000000..b068f3a
+--- /dev/null
++++ b/evidence/release-0.2.0/capabilities.json
+@@ -0,0 +1 @@
++{"batch":true,"models":["integer_tick_fixed_routes","blocking_capacity_one","entry_closures","trace_validation"],"schema":"rail-craft.capabilities/0.1","version":"0.2.0","worker_limit":64}
+diff --git a/evidence/release-0.2.0/cli.json b/evidence/release-0.2.0/cli.json
+new file mode 100644
+index 0000000..0fb27d2
+--- /dev/null
++++ b/evidence/release-0.2.0/cli.json
+@@ -0,0 +1 @@
++{"model_sha256":"898de4347d03524411fdf46ef144917c44608bb10516a65535301fc79dc53bc5","records":[{"detail":null,"id":"example","metrics":{"completed":2,"delays":[7,2],"intervals":[{"entry":0,"exit":5,"leg":0,"resource":1,"service_end":1,"train":1},{"entry":5,"exit":9,"leg":1,"resource":2,"service_end":9,"train":1},{"entry":0,"exit":10,"leg":0,"resource":0,"service_end":1,"train":0},{"entry":9,"exit":12,"leg":2,"resource":4,"service_end":12,"train":1},{"entry":10,"exit":14,"leg":1,"resource":2,"service_end":14,"train":0},{"entry":14,"exit":17,"leg":2,"resource":3,"service_end":17,"train":0}],"max_delay":7},"score":17.0,"status":"complete","steps":21}],"schema":"rail-craft.result/0.1","version":"0.2.0"}
+diff --git a/evidence/release-0.2.0/installed.json b/evidence/release-0.2.0/installed.json
+new file mode 100644
+index 0000000..fe3150b
+--- /dev/null
++++ b/evidence/release-0.2.0/installed.json
+@@ -0,0 +1,23 @@
++{
++  "installed": true,
++  "ordered_replay": true,
++  "resumed_results": 12,
++  "retained_attempts": 21,
++  "introductory_score": 17.0,
++  "batch_candidates": 96,
++  "cold_prepare_and_run_seconds": [
++    0.0006147140011307783,
++    0.0004094949981663376,
++    0.00039615599962417036
++  ],
++  "prepared_worker_1_seconds": [
++    0.00029852900479454547,
++    0.0002856989958672784,
++    0.0003363049981999211
++  ],
++  "prepared_worker_4_seconds": [
++    0.00037534400325967,
++    0.00048525899910600856,
++    0.0004722600060631521
++  ]
++}
+diff --git a/evidence/release-0.2.0/native-sweep.json b/evidence/release-0.2.0/native-sweep.json
+new file mode 100644
+index 0000000..5569bf6
+--- /dev/null
++++ b/evidence/release-0.2.0/native-sweep.json
+@@ -0,0 +1 @@
++{"detail":null,"id":"0","metrics":{"completed":2,"delays":[7,2],"intervals":null,"max_delay":7},"score":17.0,"status":"complete","steps":21}
+diff --git a/evidence/release-0.2.0/scipy-search.json b/evidence/release-0.2.0/scipy-search.json
+new file mode 100644
+index 0000000..c296f15
+--- /dev/null
++++ b/evidence/release-0.2.0/scipy-search.json
+@@ -0,0 +1,14 @@
++{
++  "mode": "full",
++  "total_seconds": 0.007441037996613886,
++  "prepare_seconds": 7.671499770367518e-05,
++  "search_seconds": 0.007326326005568262,
++  "replay_seconds": 3.799699334194884e-05,
++  "evaluations": 16,
++  "failures": 0,
++  "best": [
++    0.9178665376954516,
++    0.004332725510795259
++  ],
++  "score": 17.0
++}
+diff --git a/evidence/release-0.2.0/tutorial-check.json b/evidence/release-0.2.0/tutorial-check.json
+new file mode 100644
+index 0000000..c7d61d6
+--- /dev/null
++++ b/evidence/release-0.2.0/tutorial-check.json
+@@ -0,0 +1,5 @@
++{
++  "status": "passed",
++  "tutorial_python_blocks": 4,
++  "lean_api_and_budget_parity": true
++}
+diff --git a/evidence/release-0.2.0/validation.json b/evidence/release-0.2.0/validation.json
+new file mode 100644
+index 0000000..6b0cde8
+--- /dev/null
++++ b/evidence/release-0.2.0/validation.json
+@@ -0,0 +1,109 @@
++{
++  "baseline_delay": 40.0,
++  "corruption_checks": 5,
++  "deadlock_detected": true,
++  "exact_delay": 16,
++  "holdout_baseline": [
++    49.0,
++    25.0,
++    37.0,
++    49.0,
++    49.0,
++    37.0
++  ],
++  "holdout_failed": 0,
++  "holdout_max_delays": [
++    9,
++    5,
++    7,
++    9,
++    9,
++    7
++  ],
++  "holdout_optimized": [
++    29.0,
++    5.0,
++    17.0,
++    29.0,
++    29.0,
++    17.0
++  ],
++  "policy_candidates": 6,
++  "tick_reference_matches": true,
++  "tiny_references": [
++    {
++      "optimum": 16,
++      "orderings": 6,
++      "trains": 3
++    },
++    {
++      "optimum": 40,
++      "orderings": 24,
++      "trains": 4
++    },
++    {
++      "optimum": 80,
++      "orderings": 120,
++      "trains": 5
++    },
++    {
++      "optimum": 140,
++      "orderings": 720,
++      "trains": 6
++    }
++  ],
++  "trace": [
++    {
++      "entry": 0,
++      "exit": 5,
++      "leg": 0,
++      "resource": 1,
++      "service_end": 1,
++      "train": 1
++    },
++    {
++      "entry": 5,
++      "exit": 9,
++      "leg": 1,
++      "resource": 2,
++      "service_end": 9,
++      "train": 1
++    },
++    {
++      "entry": 0,
++      "exit": 10,
++      "leg": 0,
++      "resource": 0,
++      "service_end": 1,
++      "train": 0
++    },
++    {
++      "entry": 9,
++      "exit": 12,
++      "leg": 2,
++      "resource": 4,
++      "service_end": 12,
++      "train": 1
++    },
++    {
++      "entry": 10,
++      "exit": 14,
++      "leg": 1,
++      "resource": 2,
++      "service_end": 14,
++      "train": 0
++    },
++    {
++      "entry": 14,
++      "exit": 17,
++      "leg": 2,
++      "resource": 3,
++      "service_end": 17,
++      "train": 0
++    }
++  ],
++  "winner": [
++    1,
++    0
++  ]
++}
+diff --git a/evidence/release-0.3.0/rust-checks.txt b/evidence/release-0.3.0/rust-checks.txt
+new file mode 100644
+index 0000000..10692a7
+--- /dev/null
++++ b/evidence/release-0.3.0/rust-checks.txt
+@@ -0,0 +1,22 @@
++## cargo fmt --check
++passed
++## cargo clippy --release --locked --all-targets --features python -- -D warnings
++    Finished `release` profile [optimized] target(s) in 2.03s
++## cargo test --release --locked
++test domain::tests::event_keys_preserve_tuple_order ... ok
++test domain::tests::ranking_keys_follow_total_order_and_tie_breaks ... ok
++test domain::tests::typed_metrics_keep_sorted_value_bytes ... ok
++test domain::tests::verifier_matches_the_reference_on_corrupted_traces ... ok
++test tests::dispatch_keeps_order_and_bounds_concurrent_evaluators ... ok
++test tests::model_and_candidate_validation_are_independent ... ok
++test tests::pooled_scratch_matches_fresh_evaluators ... ok
++test tests::prepared_workers_return_same_completed_records ... ok
++test tests::score_matrix_matches_scores_json ... ok
++test tests::score_matrix_rejects_invalid_shapes_and_budgets ... ok
++test tests::scores_keep_order_status_steps_and_objective ... ok
++test domain::tests::evaluate_matches_the_reference_dispatcher ... ok
++test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++## cargo build --release --locked --bins --examples
++    Finished `release` profile [optimized] target(s) in 0.41s
+diff --git a/evidence/scipy-search.json b/evidence/scipy-search.json
+index c296f15..24caaaa 100644
+--- a/evidence/scipy-search.json
++++ b/evidence/scipy-search.json
+@@ -1,14 +1 @@
+-{
+-  "mode": "full",
+-  "total_seconds": 0.007441037996613886,
+-  "prepare_seconds": 7.671499770367518e-05,
+-  "search_seconds": 0.007326326005568262,
+-  "replay_seconds": 3.799699334194884e-05,
+-  "evaluations": 16,
+-  "failures": 0,
+-  "best": [
+-    0.9178665376954516,
+-    0.004332725510795259
+-  ],
+-  "score": 17.0
+-}
++{"mode": "full", "total_seconds": 0.003273673999501625, "prepare_seconds": 0.00010222799937764648, "search_seconds": 0.003125156000351126, "replay_seconds": 4.628999977285275e-05, "evaluations": 16, "failures": 0, "best": [0.9178665376954516, 0.004332725510795259], "score": 17.0}
+diff --git a/evidence/tutorial-check.json b/evidence/tutorial-check.json
+index c7d61d6..957e1c9 100644
+--- a/evidence/tutorial-check.json
++++ b/evidence/tutorial-check.json
+@@ -1,5 +1 @@
+-{
+-  "status": "passed",
+-  "tutorial_python_blocks": 4,
+-  "lean_api_and_budget_parity": true
+-}
++{"status": "passed", "tutorial_python_blocks": 5, "lean_api_and_budget_parity": true, "matrix_api_parity": true, "manual_python_blocks": 18}
+diff --git a/examples/python/README.md b/examples/python/README.md
+index f7374b8..9552bfc 100644
+--- a/examples/python/README.md
++++ b/examples/python/README.md
+@@ -40,5 +40,8 @@ Observations from the recorded runs:
+   waiting age; FIFO by waiting age is about 50% worse than the best policy.
+ - Block run time and clearance enter the block cycle as a sum: run time 3 with clearance 1
+   and run time 4 with clearance 0 give the same best lateness.
++- CMA-ES stops after 16 generations on the plateau-shaped three-scenario objective,
++  1.6% above the 61 x 61 grid optimum that the script prints for reference; vectorized
++  DE reaches the grid optimum of its single-scenario problem.
+ - The corridor's best policy deadlocks on the passing loop. The best policy for both lines
+   weights waiting age above priority and costs the corridor about 50% more lateness.
+diff --git a/examples/python/optimize_fcmaes_cmaes.py b/examples/python/optimize_fcmaes_cmaes.py
+index 81d4c6b..dff125a 100644
+--- a/examples/python/optimize_fcmaes_cmaes.py
++++ b/examples/python/optimize_fcmaes_cmaes.py
+@@ -18,8 +18,10 @@ logger.remove()
+ PENALTY = 1e6
+ scenarios = [Prepared(corridor(trains=20, closures=c)) for c in ([(10, 20)], [(30, 45)], [(55, 60)])]
+ bounds = Bounds([0.0, 0.0], [10.0, 10.0])
++# Cmaes samples with `randn`, which defaults to NumPy's global generator; seed both.
+ es = cmaes.Cmaes(bounds=bounds, x0=np.array([5.0, 5.0]), input_sigma=2.5, popsize=16,
+-                 rg=np.random.Generator(np.random.PCG64DXSM(5)))
++                 rg=np.random.Generator(np.random.PCG64DXSM(5)),
++                 randn=np.random.RandomState(5).randn)
+ 
+ 
+ def population_score(xs):
+@@ -47,3 +49,10 @@ for label, value in zip(("FIFO [0, 1]", "priority only [1, 0]", "equal [1, 1]"),
+     print(f"  {label:22s} mean weighted delay {value:.2f}")
+ per_scenario = [p.score_matrix([best_x])[0][0] for p in scenarios]
+ print(f"  best policy per scenario: {per_scenario}")
++
++# Reference: the same objective on a 61 x 61 grid (3,721 rows per scenario call).
++grid = np.array([[p, a] for p in np.linspace(0, 10, 61) for a in np.linspace(0, 10, 61)])
++values = population_score(grid)
++i = int(values.argmin())
++print(f"61 x 61 grid reference: mean weighted delay {values[i]:.2f} at "
++      f"[{grid[i][0]:.3f}, {grid[i][1]:.3f}]")
+diff --git a/examples/python/outputs/optimize_fcmaes_cmaes.txt b/examples/python/outputs/optimize_fcmaes_cmaes.txt
+index 7602ef3..baba41e 100644
+--- a/examples/python/outputs/optimize_fcmaes_cmaes.txt
++++ b/examples/python/outputs/optimize_fcmaes_cmaes.txt
+@@ -1,5 +1,6 @@
+-CMA-ES: mean weighted delay 1301.00 at [9.802, 0.646] after 30 generations (480 policies x 3 scenarios)
++CMA-ES: mean weighted delay 1322.33 at [7.345, 0.877] after 16 generations (256 policies x 3 scenarios)
+   FIFO [0, 1]            mean weighted delay 1881.33
+   priority only [1, 0]   mean weighted delay 1344.33
+   equal [1, 1]           mean weighted delay 1756.00
+-  best policy per scenario: [1409.0, 1447.0, 1047.0]
++  best policy per scenario: [1424.0, 1477.0, 1066.0]
++61 x 61 grid reference: mean weighted delay 1301.00 at [2.667, 0.167]
+diff --git a/examples/python/outputs/policy_grid.txt b/examples/python/outputs/policy_grid.txt
+index 28ecc71..8bae5b3 100644
+--- a/examples/python/outputs/policy_grid.txt
++++ b/examples/python/outputs/policy_grid.txt
+@@ -1,4 +1,4 @@
+-scored 1681 policies in 3.9 ms (2.33 us per policy), 267279 logical steps
++scored 1681 policies in 4.3 ms (2.53 us per policy), 267279 logical steps
+ 
+ policy                          weights        weighted delay
+ FIFO by waiting age [0, 1]      [0.00, 1.00]       921
+diff --git a/pyproject.toml b/pyproject.toml
+index bfa4082..e561816 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -4,7 +4,7 @@ build-backend = "maturin"
+ 
+ [project]
+ name = "rail-craft"
+-version = "0.2.0"
++version = "0.3.0"
+ requires-python = ">=3.10"
+ description = "Prepared rail-craft research evaluations"
+ 
+diff --git a/validation/release_checks.py b/validation/release_checks.py
+index 571fdfe..7757e6a 100644
+--- a/validation/release_checks.py
++++ b/validation/release_checks.py
+@@ -4,9 +4,12 @@ Usage: release_checks.py MODULE TUTORIAL [MANUAL]. The tutorial's blocks run in
+ namespace; the manual's blocks run in a second namespace inside a temporary directory.
+ """
+ 
++import contextlib
+ import importlib
++import io
+ import json
+ import math
++import os
+ from pathlib import Path
+ import re
+ import sys
+@@ -93,14 +96,11 @@ snippets = re.findall(r"^```python\n(.*?)^```", Path(tutorial).read_text(), re.M
+ assert len(snippets) >= 4
+ namespace = {}
+ for i, snippet in enumerate(snippets, 1):
+-    exec(compile(snippet, f"tutorial-{i}", "exec"), namespace)
++    with contextlib.redirect_stdout(io.StringIO()):
++        exec(compile(snippet, f"tutorial-{i}", "exec"), namespace)
+ report = {"status": "passed", "tutorial_python_blocks": len(snippets),
+           "lean_api_and_budget_parity": True, "matrix_api_parity": True}
+ if manual:
+-    import contextlib
+-    import io
+-    import os
+-
+     blocks = re.findall(r"^```python\n(.*?)^```", Path(manual[0]).read_text(), re.M | re.S)
+     assert len(blocks) >= 10, len(blocks)
+     namespace, here = {}, os.getcwd()
+-- 
+2.43.0
+

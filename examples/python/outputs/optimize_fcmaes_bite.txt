@@ -1,0 +1,10 @@
+BiteOpt: combined weighted delay 925 at [0.585, 9.011] (1500 calls, 310 penalized deadlocks)
+  corridor     status complete, score 921
+  passing loop status complete, score 4
+
+corridor-only optimum [4.0, 0.25]: corridor score 613, passing loop infeasible (deadlock)
+  deadlock at tick 26 after 4 arrivals; held:
+    E04 holds resource 2 (leg 2)
+    W05 holds resource 3 (leg 2)
+    E06 holds resource 1 (leg 1)
+    W07 holds resource 4 (leg 1)

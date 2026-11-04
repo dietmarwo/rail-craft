@@ -1,0 +1,72 @@
+From de84445ed8a37f5a46ec328ab88d4c181037d9c4 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Wed, 4 Nov 2026 02:55:00 +0100
+Subject: [PATCH 11/12] Index and merge rail closure intervals by resource
+
+---
+ src/domain.rs | 30 ++++++++++++++++++++++++++----
+ 1 file changed, 26 insertions(+), 4 deletions(-)
+
+diff --git a/src/domain.rs b/src/domain.rs
+index ad6e2b2..8125ff5 100644
+--- a/src/domain.rs
++++ b/src/domain.rs
+@@ -23,6 +23,8 @@ pub struct Model {
+     closures: Vec<Closure>,
+     #[serde(skip)]
+     initial_events: BinaryHeap<Event>,
++    #[serde(skip)]
++    closed_by_resource: Vec<Vec<(u64, u64)>>,
+ }
+ #[derive(Deserialize)]
+ #[serde(deny_unknown_fields)]
+@@ -114,6 +116,27 @@ pub fn prepare(mut model: Model) -> Result<Model, String> {
+         events.push(Reverse((c.end, 1, i)));
+     }
+     model.initial_events = BinaryHeap::from(events);
++    let mut closures = vec![Vec::new(); model.resources.len()];
++    for c in &model.closures {
++        closures[c.resource].push((c.start, c.end));
++    }
++    model.closed_by_resource = closures
++        .into_iter()
++        .map(|mut rows| {
++            rows.sort_unstable();
++            let mut merged: Vec<(u64, u64)> = Vec::new();
++            for (start, end) in rows {
++                if let Some(last) = merged.last_mut()
++                    && start <= last.1
++                {
++                    last.1 = last.1.max(end);
++                } else {
++                    merged.push((start, end));
++                }
++            }
++            merged
++        })
++        .collect();
+     Ok(model)
+ }
+ 
+@@ -298,15 +321,14 @@ pub fn validate_trace(model: &Model, intervals: &[Interval]) -> Result<(), Strin
+         let Some(leg) = train.route.get(row.leg) else {
+             return Err("unknown movement".into());
+         };
++        let closed = &model.closed_by_resource[leg.resource];
++        let next = closed.partition_point(|&(start, _)| start <= row.entry);
+         if row.resource != leg.resource
+             || row.entry < train.release
+             || row.exit > model.horizon
+             || row.entry.checked_add(leg.duration) != Some(row.service_end)
+             || row.service_end > row.exit
+-            || model
+-                .closures
+-                .iter()
+-                .any(|c| c.resource == row.resource && (c.start..c.end).contains(&row.entry))
++            || (next > 0 && row.entry < closed[next - 1].1)
+         {
+             return Err("resource, release, service, horizon, or closure violation".into());
+         }
+-- 
+2.51.1
+

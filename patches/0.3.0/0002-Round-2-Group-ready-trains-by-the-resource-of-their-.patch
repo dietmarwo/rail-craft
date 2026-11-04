@@ -1,0 +1,490 @@
+From 8207392e1aa8ec6003a0e8c967b83b5ac7321c62 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 11:35:49 -0400
+Subject: [PATCH 02/15] Round 2: Group ready trains by the resource of their
+ next leg
+
+Keep one 128-bit ready mask per resource and a mask of resources with
+waiting trains. Each dispatch pass checks a resource's availability once
+and ranks only trains waiting for available resources, with an explicit
+(score, earlier waiting start, lower index) key. A randomized test
+compares the kernel with the 0.2.0 dispatcher on full traced output,
+steps and work-limit points.
+
+Workload: domain (48 full records, 110 trains, one worker), 11 samples.
+Before median: 4.823 ms. After median: 2.637 ms. Speedup: 1.83x.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ evidence/performance-0.3.0/plan.md            |  10 +
+ .../performance-0.3.0/round02-domain.json     |  36 ++
+ src/domain.rs                                 | 357 +++++++++++++++++-
+ 3 files changed, 385 insertions(+), 18 deletions(-)
+ create mode 100644 evidence/performance-0.3.0/round02-domain.json
+
+diff --git a/evidence/performance-0.3.0/plan.md b/evidence/performance-0.3.0/plan.md
+index 62c4e6c..b5c7c02 100644
+--- a/evidence/performance-0.3.0/plan.md
++++ b/evidence/performance-0.3.0/plan.md
+@@ -28,3 +28,13 @@ save its timing under `rejected/` and try something else.
+   (lean `scores_json`). After: round 1 with `--after-matrix` (`score_matrix`).
+ - Expected effect: removes candidate JSON decoding, ID checks and record JSON encoding;
+   expect a large gain (more than 1.3x) because the example kernel is small.
++
++### Round 2: per-resource ready masks in the dispatcher
++
++- Workload: `domain` (48 full records, 110 trains on one resource), round 1 against round 2.
++- Change: keep one 128-bit ready mask per resource (trains whose next leg uses it) and a
++  128-bit mask of resources with waiting trains. A dispatch pass checks each such resource's
++  availability once and ranks only the trains waiting for available resources. The ranking
++  key stays (score, earlier waiting start, lower train index), now compared explicitly.
++- Expected effect: most passes happen while the single block is owned or in clearance; those
++  passes become O(1) instead of a scan over about 100 waiting trains. Expect more than 1.5x.
+diff --git a/evidence/performance-0.3.0/round02-domain.json b/evidence/performance-0.3.0/round02-domain.json
+new file mode 100644
+index 0000000..b805ae9
+--- /dev/null
++++ b/evidence/performance-0.3.0/round02-domain.json
+@@ -0,0 +1,36 @@
++{
++  "workload": "domain",
++  "before_mode": "full",
++  "after_mode": "full",
++  "before_seconds": [
++    0.005266481,
++    0.0051915872,
++    0.0052264406,
++    0.0048234466,
++    0.0047295072,
++    0.004760998000000001,
++    0.0050214108,
++    0.0057454072,
++    0.0045605164,
++    0.0034275984,
++    0.0034268106
++  ],
++  "after_seconds": [
++    0.0028656234,
++    0.0027978312000000003,
++    0.0028149002,
++    0.0026370054,
++    0.0025799908,
++    0.0025739292,
++    0.0028093584000000002,
++    0.0030219369999999997,
++    0.0019699576,
++    0.0020367225999999997,
++    0.0021073458
++  ],
++  "medians_seconds": [
++    0.0048234466,
++    0.0026370054
++  ],
++  "speedup": 1.8291379304721938
++}
+diff --git a/src/domain.rs b/src/domain.rs
+index e08ea7a..57226ba 100644
+--- a/src/domain.rs
++++ b/src/domain.rs
+@@ -171,7 +171,10 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
+     let mut events = model.initial_events.clone();
+     let mut intervals = Vec::new();
+     let mut completed = 0;
+-    let mut ready = 0_u128;
++    // Ready trains grouped by the resource of their next leg, plus the resources
++    // that have at least one ready train. Both models are limited to 128 entries.
++    let mut ready_on = vec![0_u128; model.resources.len()];
++    let mut waiting_resources = 0_u128;
+     let mut time = 0;
+     let release = |mut interval: Interval,
+                    time,
+@@ -216,39 +219,51 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
+                         state.arrival = Some(time);
+                         completed += 1;
+                     } else {
+-                        ready |= 1_u128 << i;
++                        let r = model.trains[i].route[state.next].resource;
++                        ready_on[r] |= 1_u128 << i;
++                        waiting_resources |= 1_u128 << r;
+                         state.waiting_since = time;
+                     }
+                 }
+                 1 => resources[model.closures[i].resource].closures -= 1,
+                 2 => resources[model.closures[i].resource].closures += 1,
+                 3 => {
+-                    ready |= 1_u128 << i;
++                    let r = model.trains[i].route[0].resource;
++                    ready_on[r] |= 1_u128 << i;
++                    waiting_resources |= 1_u128 << r;
+                     trains[i].waiting_since = time;
+                 }
+                 _ => {}
+             }
+         }
+         loop {
+-            let mut contenders = ready;
++            // Rank (score, earlier waiting start, lower train index) over trains whose
++            // next resource is available. Blocked resources are skipped as a group.
+             let mut best = None::<(usize, u64, f64)>;
+-            while contenders != 0 {
+-                let i = contenders.trailing_zeros() as usize;
+-                contenders &= contenders - 1;
+-                let state = &trains[i];
+-                let resource = &resources[model.trains[i].route[state.next].resource];
++            let mut open = waiting_resources;
++            while open != 0 {
++                let r = open.trailing_zeros() as usize;
++                open &= open - 1;
++                let resource = &resources[r];
+                 if resource.owner.is_some() || resource.free_after > time || resource.closures != 0
+                 {
+                     continue;
+                 }
+-                let score = weighted_priority[i] + age * (time - state.waiting_since) as f64;
+-                if best.is_none_or(|(_, since, previous)| {
+-                    score
+-                        .total_cmp(&previous)
+-                        .then_with(|| since.cmp(&state.waiting_since))
+-                        .is_gt()
+-                }) {
+-                    best = Some((i, state.waiting_since, score));
++                let mut contenders = ready_on[r];
++                while contenders != 0 {
++                    let i = contenders.trailing_zeros() as usize;
++                    contenders &= contenders - 1;
++                    let since = trains[i].waiting_since;
++                    let score = weighted_priority[i] + age * (time - since) as f64;
++                    if best.is_none_or(|(previous_i, previous_since, previous)| {
++                        score
++                            .total_cmp(&previous)
++                            .then_with(|| previous_since.cmp(&since))
++                            .then_with(|| previous_i.cmp(&i))
++                            .is_gt()
++                    }) {
++                        best = Some((i, since, score));
++                    }
+                 }
+             }
+             let Some((i, _, _)) = best else { break };
+@@ -273,7 +288,10 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
+                 exit: end,
+             });
+             state.next += 1;
+-            ready &= !(1_u128 << i);
++            ready_on[leg.resource] &= !(1_u128 << i);
++            if ready_on[leg.resource] == 0 {
++                waiting_resources &= !(1_u128 << leg.resource);
++            }
+             events.push(Reverse((end, 0, i)));
+         }
+         if completed == trains.len() {
+@@ -363,3 +381,306 @@ pub fn verify_json(model: &str, trace: &str) -> Result<serde_json::Value, String
+     validate_trace(&model, &rows)?;
+     Ok(json!({"valid":true,"movements":rows.len()}))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::Budget;
++    use serde_json::Value;
++
++    /// The 0.2.0 dispatcher and verifier, kept verbatim apart from building its own
++    /// event heap, as an oracle for structural changes to `evaluate`.
++    fn reference(
++        model: &Model,
++        parameters: &[f64],
++        trace: bool,
++        work: &mut Work<'_>,
++    ) -> Evaluation {
++        let &[priority, age] = parameters else {
++            return Err(invalid("expected priority and waiting-time weights"));
++        };
++        if ![priority, age].iter().all(|v| (0.0..=10.0).contains(v)) {
++            return Err(invalid("weights must be in [0,10]"));
++        }
++        let mut trains: Vec<_> = model.trains.iter().map(|_| TrainState::default()).collect();
++        let mut resources: Vec<_> = model
++            .resources
++            .iter()
++            .map(|_| ResourceState::default())
++            .collect();
++        let mut events = BinaryHeap::new();
++        for (i, train) in model.trains.iter().enumerate() {
++            events.push(Reverse((train.release, 3_u8, i)));
++        }
++        for (i, c) in model.closures.iter().enumerate() {
++            events.push(Reverse((c.start, 2, i)));
++            events.push(Reverse((c.end, 1, i)));
++        }
++        let mut intervals = Vec::new();
++        let mut completed = 0;
++        let mut ready = 0_u128;
++        let mut time = 0;
++        let release = |mut interval: Interval,
++                       time,
++                       resources: &mut [ResourceState],
++                       intervals: &mut Vec<Interval>,
++                       events: &mut BinaryHeap<_>| {
++            interval.exit = time;
++            let r = interval.resource;
++            resources[r].owner = None;
++            resources[r].free_after = time + model.resources[r].clearance;
++            if resources[r].free_after > time {
++                events.push(Reverse((resources[r].free_after, 4, r)));
++            }
++            intervals.push(interval);
++        };
++        while let Some(&Reverse((at, _, _))) = events.peek() {
++            if at > model.horizon {
++                break;
++            }
++            time = at;
++            while events.peek().is_some_and(|Reverse((t, _, _))| *t == at) {
++                if let Err(e) = work.step() {
++                    return Err(e.with_metrics(
++                        json!({"closed_intervals": trace.then_some(&intervals), "completed":completed, "time":time}),
++                    ));
++                }
++                let Reverse((_, kind, i)) = events.pop().expect("peeked event");
++                match kind {
++                    0 => {
++                        let state = &mut trains[i];
++                        if state.next == model.trains[i].route.len() {
++                            release(
++                                state.held.take().expect("active train"),
++                                time,
++                                &mut resources,
++                                &mut intervals,
++                                &mut events,
++                            );
++                            state.arrival = Some(time);
++                            completed += 1;
++                        } else {
++                            ready |= 1_u128 << i;
++                            state.waiting_since = time;
++                        }
++                    }
++                    1 => resources[model.closures[i].resource].closures -= 1,
++                    2 => resources[model.closures[i].resource].closures += 1,
++                    3 => {
++                        ready |= 1_u128 << i;
++                        trains[i].waiting_since = time;
++                    }
++                    _ => {}
++                }
++            }
++            loop {
++                let mut contenders = ready;
++                let mut best = None::<(usize, u64, f64)>;
++                while contenders != 0 {
++                    let i = contenders.trailing_zeros() as usize;
++                    contenders &= contenders - 1;
++                    let state = &trains[i];
++                    let resource = &resources[model.trains[i].route[state.next].resource];
++                    if resource.owner.is_some()
++                        || resource.free_after > time
++                        || resource.closures != 0
++                    {
++                        continue;
++                    }
++                    let score = priority * model.trains[i].priority
++                        + age * (time - state.waiting_since) as f64;
++                    if best.is_none_or(|(_, since, previous)| {
++                        score
++                            .total_cmp(&previous)
++                            .then_with(|| since.cmp(&state.waiting_since))
++                            .is_gt()
++                    }) {
++                        best = Some((i, state.waiting_since, score));
++                    }
++                }
++                let Some((i, _, _)) = best else { break };
++                if let Err(e) = work.step() {
++                    return Err(e.with_metrics(
++                        json!({"closed_intervals":trace.then_some(&intervals),"completed":completed,"time":time}),
++                    ));
++                }
++                let state = &mut trains[i];
++                if let Some(previous) = state.held.take() {
++                    release(previous, time, &mut resources, &mut intervals, &mut events);
++                }
++                let leg = &model.trains[i].route[state.next];
++                let end = time + leg.duration;
++                resources[leg.resource].owner = Some(i);
++                state.held = Some(Interval {
++                    train: i,
++                    leg: state.next,
++                    resource: leg.resource,
++                    entry: time,
++                    service_end: end,
++                    exit: end,
++                });
++                state.next += 1;
++                ready &= !(1_u128 << i);
++                events.push(Reverse((end, 0, i)));
++            }
++            if completed == trains.len() {
++                break;
++            }
++        }
++        if completed != trains.len() {
++            let active: Vec<_> = trains.iter().filter_map(|t| t.held.as_ref()).collect();
++            let reason = if events.is_empty() {
++                "deadlock"
++            } else {
++                "horizon"
++            };
++            return Err(infeasible(reason).with_metrics(
++                json!({"completed":completed,"time":time,"closed_intervals":trace.then_some(&intervals),"active":trace.then_some(active)}),
++            ));
++        }
++        validate_trace(model, &intervals).map_err(invalid)?;
++        let delay: Vec<_> = trains
++            .iter()
++            .zip(&model.trains)
++            .map(|(s, t)| s.arrival.expect("completed").saturating_sub(t.planned))
++            .collect();
++        let score: f64 = delay
++            .iter()
++            .zip(&model.trains)
++            .map(|(&d, t)| d as f64 * (1.0 + t.priority))
++            .sum();
++        Ok((
++            score,
++            work.metrics(|| {
++                json!({"completed":completed,"max_delay":delay.iter().max(),"delays":delay,
++            "intervals":trace.then_some(intervals)})
++            }),
++        ))
++    }
++
++    /// Small deterministic generator for reproducible random corridors.
++    struct Lcg(u64);
++    impl Lcg {
++        fn below(&mut self, n: u64) -> u64 {
++            self.0 = self
++                .0
++                .wrapping_mul(6_364_136_223_846_793_005)
++                .wrapping_add(1_442_695_040_888_963_407);
++            (self.0 >> 33) % n
++        }
++    }
++
++    fn random_model(seed: u64) -> Value {
++        let mut rng = Lcg(seed);
++        let resources = 1 + rng.below(6) as usize;
++        let trains = if seed.is_multiple_of(17) {
++            100 + rng.below(29) as usize
++        } else {
++            1 + rng.below(14) as usize
++        };
++        let horizon = 30 + rng.below(400);
++        let priorities = [0.0, 1.0, 2.5, 3.0, 0.125, 1000.0];
++        let train_rows: Vec<_> = (0..trains)
++            .map(|i| {
++                let legs = 1 + rng.below(4.min(resources as u64 + 1));
++                let mut route = Vec::new();
++                let mut last = usize::MAX;
++                for _ in 0..legs {
++                    let mut r = rng.below(resources as u64) as usize;
++                    if r == last {
++                        r = (r + 1) % resources;
++                    }
++                    if r == last {
++                        break;
++                    }
++                    last = r;
++                    route.push(json!({"resource": r, "duration": 1 + rng.below(5)}));
++                }
++                json!({"name": format!("T{i}"), "release": rng.below(12), "planned": rng.below(25),
++                       "priority": priorities[rng.below(6) as usize], "route": route})
++            })
++            .collect();
++        let closures: Vec<_> = (0..rng.below(8))
++            .map(|_| {
++                let start = rng.below(40);
++                json!({"resource": rng.below(resources as u64), "start": start,
++                       "end": start + 1 + rng.below(6)})
++            })
++            .collect();
++        let resource_rows: Vec<_> = (0..resources)
++            .map(|r| json!({"name": format!("R{r}"), "clearance": rng.below(3)}))
++            .collect();
++        json!({"resources": resource_rows, "trains": train_rows, "horizon": horizon,
++               "closures": closures})
++    }
++
++    fn run(
++        kernel: fn(&Model, &[f64], bool, &mut Work<'_>) -> Evaluation,
++        model: &Model,
++        parameters: &[f64],
++        trace: bool,
++        budget: &Budget,
++    ) -> Value {
++        let mut work = Work {
++            budget,
++            deadline: None,
++            used: 0,
++            monitored: false,
++            metrics_enabled: true,
++        };
++        let result = kernel(model, parameters, trace, &mut work);
++        match result {
++            Ok((score, metrics)) => json!({"status": "complete", "score": score,
++                                          "metrics": metrics, "steps": work.used}),
++            Err(e) => json!({"status": e.status, "detail": e.detail, "metrics": e.metrics,
++                             "steps": work.used}),
++        }
++    }
++
++    #[test]
++    fn evaluate_matches_the_reference_dispatcher() {
++        let weights = [
++            [1.0, 0.0],
++            [0.0, 0.0],
++            [0.0, 1.0],
++            [2.5, 0.75],
++            [10.0, 10.0],
++            [0.1, 0.3],
++            [-0.0, -0.0],
++        ];
++        let mut outcomes = std::collections::BTreeMap::new();
++        for seed in 0..400 {
++            let text = random_model(seed).to_string();
++            let Ok(model) = prepare(serde_json::from_str(&text).unwrap()) else {
++                continue;
++            };
++            for (k, parameters) in weights.iter().enumerate() {
++                let trace = (seed + k as u64).is_multiple_of(2);
++                for max_steps in [1_000_000, 1 + seed % 40] {
++                    let budget = Budget {
++                        max_steps,
++                        ..Budget::default()
++                    };
++                    let expected = run(reference, &model, parameters, trace, &budget);
++                    let actual = run(evaluate, &model, parameters, trace, &budget);
++                    assert_eq!(actual, expected, "seed {seed} weights {parameters:?}");
++                    *outcomes
++                        .entry(format!("{}:{}", expected["status"], expected["detail"]))
++                        .or_insert(0) += 1;
++                }
++            }
++        }
++        // The generator must reach every outcome class the kernel can produce.
++        for class in [
++            "\"complete\":null",
++            "\"work_limit\":\"candidate step budget reached\"",
++            "\"infeasible\":\"horizon\"",
++            "\"infeasible\":\"deadlock\"",
++        ] {
++            assert!(
++                outcomes.contains_key(class),
++                "{class} missing from {outcomes:?}"
++            );
++        }
++    }
++}
+-- 
+2.43.0
+

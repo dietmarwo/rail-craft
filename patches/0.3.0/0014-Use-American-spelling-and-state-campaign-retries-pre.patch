@@ -1,0 +1,69 @@
+From 6696c194cb7433300a7fdd7977411dfffe4dbac0 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 13:02:28 -0400
+Subject: [PATCH 14/15] Use American spelling and state campaign retries
+ precisely
+
+Rename the manual's example unknown field to color and update its shown
+error message. The manual and the architecture guide now say that only
+complete, invalid and infeasible campaign records are cached, and that
+work-limited, time-limited and canceled attempts stay in the journal
+and are retried.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ docs/architecture.md | 4 ++--
+ docs/user-manual.md  | 8 ++++----
+ 2 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 9360ef9..d095e03 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -152,8 +152,8 @@ and train dynamics are outside the supported input.
+ 
+ The local campaign hashes the installed extension bytes plus each scenario, model,
+ candidate and work settings to locate reusable records. SQLite stores completed, invalid
+-and infeasible results, and keeps an append-only journal of attempts. Cancelled or
+-time-limited attempts remain in the journal and can be retried. SQLite commits each chunk
++and infeasible results, and keeps an append-only journal of attempts. Work-limited,
++time-limited and canceled attempts remain only in the journal and are retried. SQLite commits each chunk
+ atomically. A new extension build changes the cache namespace. The current workflow is
+ local and exposes no distributed worker protocol.
+ 
+diff --git a/docs/user-manual.md b/docs/user-manual.md
+index c68c877..92b2c4e 100644
+--- a/docs/user-manual.md
++++ b/docs/user-manual.md
+@@ -737,7 +737,7 @@ Malformed batches are rejected as a whole:
+ 
+ ```python
+ for bad in ([{"id": "a", "parameters": [1, 0]}, {"id": "a", "parameters": [0, 1]}],
+-            [{"id": "x", "parameters": [1, 0], "colour": "red"}]):
++            [{"id": "x", "parameters": [1, 0], "color": "red"}]):
+     try:
+         prepared.batch(bad)
+     except ValueError as error:
+@@ -754,7 +754,7 @@ except ValueError as error:
+ 
+ ```text
+ ValueError: invalid or duplicate candidate id, or parameter vector exceeds limit
+-ValueError: unknown field `colour`, expected one of `id`, `parameters`, `trace` at line 1 column 10
++ValueError: unknown field `color`, expected one of `id`, `parameters`, `trace` at line 1 column 9
+ ValueError: invalid budget or batch size
+ ValueError: ragged parameter rows
+ ```
+@@ -935,8 +935,8 @@ long closure fifo complete 79.0
+ Each returned row has `scenario`, `key`, `build_sha256`, `model_sha256` and the full
+ `record`. The cache key hashes the native extension file, the scenario ID, the model, the
+ candidate and the budget without `cancel_file`. Complete, invalid and infeasible results
+-are cached; cancelled and time-limited attempts stay in the `attempts` journal and are
+-retried. A different wheel build uses a new cache namespace. The command-line driver
++are cached; records with any other status (`work_limit`, `wall_limit` or `cancelled`)
++stay only in the `attempts` journal and are evaluated again by the next run. A different wheel build uses a new cache namespace. The command-line driver
+ `validation/run_campaign.py MODULE MANIFEST DATABASE` runs a manifest such as
+ `models/campaign.json` with four workers.
+ 
+-- 
+2.43.0
+
