@@ -44,9 +44,43 @@ fn main() {
             json!({"id": format!("candidate-{i:04}"), "parameters": values, "trace": traced})
         })
         .collect();
-    let candidates = serde_json::to_string(&candidates).unwrap();
     let budget = json!({"workers":workers}).to_string();
     let evaluator = Prepared::new(&model.to_string()).unwrap();
+    if std::env::var_os("CRAFT_MATRIX").is_some() {
+        assert!(!traced, "matrix mode accepts untraced workloads only");
+        let rows: Vec<f64> = candidates
+            .iter()
+            .flat_map(|c| c["parameters"].as_array().unwrap())
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        let evaluate = || evaluator.score_matrix(count, &rows, &budget).unwrap();
+        let first = evaluate();
+        if args.next().as_deref() == Some("probe") {
+            let records: Vec<_> = first
+                .iter()
+                .zip(&candidates)
+                .map(|(row, c)| {
+                    json!({"id": c["id"], "status": row.status, "steps": row.steps,
+                           "score": row.score, "metrics": null, "detail": null})
+                })
+                .collect();
+            println!(
+                "{}",
+                json!({"model_sha256": evaluator.model_sha256(), "records": records,
+                       "schema": concat!(env!("CARGO_PKG_NAME"), ".result/0.1"),
+                       "version": env!("CARGO_PKG_VERSION")})
+            );
+            return;
+        }
+        black_box(first);
+        let start = Instant::now();
+        for _ in 0..repeats {
+            black_box(evaluate());
+        }
+        println!("{}", start.elapsed().as_secs_f64() / f64::from(repeats));
+        return;
+    }
+    let candidates = serde_json::to_string(&candidates).unwrap();
     let lean = std::env::var_os("CRAFT_SCORES").is_some();
     let evaluate = || {
         if lean {

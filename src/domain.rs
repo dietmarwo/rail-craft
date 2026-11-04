@@ -1,4 +1,4 @@
-use crate::{Candidate, Evaluation, Work, infeasible, invalid};
+use crate::{Evaluation, Work, infeasible, invalid};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
@@ -154,8 +154,8 @@ struct ResourceState {
     closures: u32,
 }
 
-pub fn evaluate(model: &Model, candidate: &Candidate, work: &mut Work<'_>) -> Evaluation {
-    let &[priority, age] = candidate.parameters.as_slice() else {
+pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<'_>) -> Evaluation {
+    let &[priority, age] = parameters else {
         return Err(invalid("expected priority and waiting-time weights"));
     };
     if ![priority, age].iter().all(|v| (0.0..=10.0).contains(v)) {
@@ -198,7 +198,7 @@ pub fn evaluate(model: &Model, candidate: &Candidate, work: &mut Work<'_>) -> Ev
         {
             if let Err(e) = work.step() {
                 return Err(e.with_metrics(
-                    json!({"closed_intervals": candidate.trace.then_some(&intervals), "completed":completed, "time":time}),
+                    json!({"closed_intervals": trace.then_some(&intervals), "completed":completed, "time":time}),
                 ));
             }
             let Reverse((_, kind, i)) = events.pop().expect("peeked event");
@@ -254,7 +254,7 @@ pub fn evaluate(model: &Model, candidate: &Candidate, work: &mut Work<'_>) -> Ev
             let Some((i, _, _)) = best else { break };
             if let Err(e) = work.step() {
                 return Err(e.with_metrics(
-                    json!({"closed_intervals":candidate.trace.then_some(&intervals),"completed":completed,"time":time}),
+                    json!({"closed_intervals":trace.then_some(&intervals),"completed":completed,"time":time}),
                 ));
             }
             let state = &mut trains[i];
@@ -288,7 +288,7 @@ pub fn evaluate(model: &Model, candidate: &Candidate, work: &mut Work<'_>) -> Ev
             "horizon"
         };
         return Err(infeasible(reason).with_metrics(
-            json!({"completed":completed,"time":time,"closed_intervals":candidate.trace.then_some(&intervals),"active":candidate.trace.then_some(active)}),
+            json!({"completed":completed,"time":time,"closed_intervals":trace.then_some(&intervals),"active":trace.then_some(active)}),
         ));
     }
     validate_trace(model, &intervals).map_err(invalid)?;
@@ -306,7 +306,7 @@ pub fn evaluate(model: &Model, candidate: &Candidate, work: &mut Work<'_>) -> Ev
         score,
         work.metrics(|| {
             json!({"completed":completed,"max_delay":delay.iter().max(),"delays":delay,
-        "intervals":candidate.trace.then_some(intervals)})
+        "intervals":trace.then_some(intervals)})
         }),
     ))
 }

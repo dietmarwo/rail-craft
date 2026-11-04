@@ -21,6 +21,20 @@ class Prepared:
         """Return ordered objectives and statuses for untraced candidates."""
         return json.loads(self._native.scores(_encode(candidates), _encode(budget)))
 
+    def score_matrix(self, rows, **budget):
+        """Score untraced parameter rows without JSON records.
+
+        ``rows`` is a list of equal-length lists or a 2-D NumPy array. Returns
+        ``(scores, statuses, steps)`` as three lists in row order. Scores are NaN
+        for every row whose status is not ``"complete"``.
+        """
+        if hasattr(rows, "tolist"):
+            if getattr(rows, "ndim", 2) != 2:
+                raise ValueError("score_matrix expects a 2-D array of parameter rows")
+            rows = rows.tolist()
+        scores, statuses, steps = self._native.score_matrix(rows, _encode(budget))
+        return scores, statuses, steps
+
     def evaluate(self, parameters, *, trace=False, **budget):
         return self.batch([{"id": "one", "parameters": parameters, "trace": trace}], **budget)[
             "records"

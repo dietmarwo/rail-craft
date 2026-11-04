@@ -2,6 +2,7 @@
 
 import importlib
 import json
+import math
 from pathlib import Path
 import re
 import sys
@@ -23,6 +24,18 @@ with TemporaryDirectory() as tmp:
         assert lean["records"] == [r | {"metrics": None} for r in full["records"]]
         if "cancel_file" in budget:
             assert lean["records"][0]["status"] == "cancelled"
+        # The typed matrix API must agree with lean records row by row.
+        for dimension in sorted({len(c["parameters"]) for c in candidates}):
+            same = [c for c in candidates if len(c["parameters"]) == dimension]
+            records = prepared.scores(same, **budget)["records"]
+            scores, statuses, steps = prepared.score_matrix([c["parameters"] for c in same], **budget)
+            assert statuses == [r["status"] for r in records]
+            assert steps == [r["steps"] for r in records]
+            for score, record in zip(scores, records, strict=True):
+                if record["status"] == "complete":
+                    assert score == record["score"]
+                else:
+                    assert math.isnan(score)
     if module == "population_epidemiology":
         calendar = package.Prepared({"kind": "calendar", "initial_on_probability": 0.5,
                                      "segments": [{"duration": 1, "on_rate": 0, "off_rate": 0}] * 3})
@@ -54,6 +67,23 @@ except ValueError:
     pass
 else:
     raise AssertionError("scores accepted a traced candidate")
+for bad_rows in ([[1.0, 0.0], [1.0]], [], [[0.0] * 65]):
+    try:
+        prepared.score_matrix(bad_rows)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"score_matrix accepted {bad_rows!r}")
+import numpy
+
+grid = numpy.array([example["parameters"], example["parameters"]], dtype=float)
+assert prepared.score_matrix(grid) == prepared.score_matrix(grid.tolist())
+try:
+    prepared.score_matrix(grid[0])
+except ValueError:
+    pass
+else:
+    raise AssertionError("score_matrix accepted a 1-D array")
 
 snippets = re.findall(r"^```python\n(.*?)^```", Path(tutorial).read_text(), re.M | re.S)
 assert len(snippets) >= 4
@@ -61,4 +91,4 @@ namespace = {}
 for i, snippet in enumerate(snippets, 1):
     exec(compile(snippet, f"tutorial-{i}", "exec"), namespace)
 print(json.dumps({"status": "passed", "tutorial_python_blocks": len(snippets),
-                  "lean_api_and_budget_parity": True}))
+                  "lean_api_and_budget_parity": True, "matrix_api_parity": True}))
