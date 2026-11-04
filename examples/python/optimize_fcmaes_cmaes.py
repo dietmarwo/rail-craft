@@ -18,8 +18,10 @@ logger.remove()
 PENALTY = 1e6
 scenarios = [Prepared(corridor(trains=20, closures=c)) for c in ([(10, 20)], [(30, 45)], [(55, 60)])]
 bounds = Bounds([0.0, 0.0], [10.0, 10.0])
+# Cmaes samples with `randn`, which defaults to NumPy's global generator; seed both.
 es = cmaes.Cmaes(bounds=bounds, x0=np.array([5.0, 5.0]), input_sigma=2.5, popsize=16,
-                 rg=np.random.Generator(np.random.PCG64DXSM(5)))
+                 rg=np.random.Generator(np.random.PCG64DXSM(5)),
+                 randn=np.random.RandomState(5).randn)
 
 
 def population_score(xs):
@@ -47,3 +49,10 @@ for label, value in zip(("FIFO [0, 1]", "priority only [1, 0]", "equal [1, 1]"),
     print(f"  {label:22s} mean weighted delay {value:.2f}")
 per_scenario = [p.score_matrix([best_x])[0][0] for p in scenarios]
 print(f"  best policy per scenario: {per_scenario}")
+
+# Reference: the same objective on a 61 x 61 grid (3,721 rows per scenario call).
+grid = np.array([[p, a] for p in np.linspace(0, 10, 61) for a in np.linspace(0, 10, 61)])
+values = population_score(grid)
+i = int(values.argmin())
+print(f"61 x 61 grid reference: mean weighted delay {values[i]:.2f} at "
+      f"[{grid[i][0]:.3f}, {grid[i][1]:.3f}]")

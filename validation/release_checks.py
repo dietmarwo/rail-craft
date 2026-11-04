@@ -4,9 +4,12 @@ Usage: release_checks.py MODULE TUTORIAL [MANUAL]. The tutorial's blocks run in 
 namespace; the manual's blocks run in a second namespace inside a temporary directory.
 """
 
+import contextlib
 import importlib
+import io
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sys
@@ -93,14 +96,11 @@ snippets = re.findall(r"^```python\n(.*?)^```", Path(tutorial).read_text(), re.M
 assert len(snippets) >= 4
 namespace = {}
 for i, snippet in enumerate(snippets, 1):
-    exec(compile(snippet, f"tutorial-{i}", "exec"), namespace)
+    with contextlib.redirect_stdout(io.StringIO()):
+        exec(compile(snippet, f"tutorial-{i}", "exec"), namespace)
 report = {"status": "passed", "tutorial_python_blocks": len(snippets),
           "lean_api_and_budget_parity": True, "matrix_api_parity": True}
 if manual:
-    import contextlib
-    import io
-    import os
-
     blocks = re.findall(r"^```python\n(.*?)^```", Path(manual[0]).read_text(), re.M | re.S)
     assert len(blocks) >= 10, len(blocks)
     namespace, here = {}, os.getcwd()

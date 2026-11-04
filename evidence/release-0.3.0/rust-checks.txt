@@ -1,0 +1,22 @@
+## cargo fmt --check
+passed
+## cargo clippy --release --locked --all-targets --features python -- -D warnings
+    Finished `release` profile [optimized] target(s) in 2.03s
+## cargo test --release --locked
+test domain::tests::event_keys_preserve_tuple_order ... ok
+test domain::tests::ranking_keys_follow_total_order_and_tie_breaks ... ok
+test domain::tests::typed_metrics_keep_sorted_value_bytes ... ok
+test domain::tests::verifier_matches_the_reference_on_corrupted_traces ... ok
+test tests::dispatch_keeps_order_and_bounds_concurrent_evaluators ... ok
+test tests::model_and_candidate_validation_are_independent ... ok
+test tests::pooled_scratch_matches_fresh_evaluators ... ok
+test tests::prepared_workers_return_same_completed_records ... ok
+test tests::score_matrix_matches_scores_json ... ok
+test tests::score_matrix_rejects_invalid_shapes_and_budgets ... ok
+test tests::scores_keep_order_status_steps_and_objective ... ok
+test domain::tests::evaluate_matches_the_reference_dispatcher ... ok
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+## cargo build --release --locked --bins --examples
+    Finished `release` profile [optimized] target(s) in 0.41s

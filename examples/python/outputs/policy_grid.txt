@@ -1,4 +1,4 @@
-scored 1681 policies in 3.9 ms (2.33 us per policy), 267279 logical steps
+scored 1681 policies in 4.3 ms (2.53 us per policy), 267279 logical steps
 
 policy                          weights        weighted delay
 FIFO by waiting age [0, 1]      [0.00, 1.00]       921

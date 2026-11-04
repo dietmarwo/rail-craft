@@ -40,5 +40,8 @@ Observations from the recorded runs:
   waiting age; FIFO by waiting age is about 50% worse than the best policy.
 - Block run time and clearance enter the block cycle as a sum: run time 3 with clearance 1
   and run time 4 with clearance 0 give the same best lateness.
+- CMA-ES stops after 16 generations on the plateau-shaped three-scenario objective,
+  1.6% above the 61 x 61 grid optimum that the script prints for reference; vectorized
+  DE reaches the grid optimum of its single-scenario problem.
 - The corridor's best policy deadlocks on the passing loop. The best policy for both lines
   weights waiting age above priority and costs the corridor about 50% more lateness.

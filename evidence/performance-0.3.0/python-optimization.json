@@ -1,0 +1,548 @@
+{
+  "host": "2 vCPUs, Intel(R) Xeon(R) Processor @ 2.10GHz (KVM), CPython 3.12.3, SciPy 1.17.0, NumPy 2.3.5, taskset -c 0",
+  "method": "7 runs per configuration, configurations interleaved in rotating order; medians per column, total median per run",
+  "agreement": {
+    "all_configurations_agree": true,
+    "evaluations": 16,
+    "failures": 0,
+    "best": [
+      0.9178665376954516,
+      0.004332725510795259
+    ],
+    "score": 17.0
+  },
+  "medians_seconds": {
+    "v0.2.0-full": {
+      "prepare_seconds": 9.898600001179148e-05,
+      "search_seconds": 0.0034283619997950154,
+      "replay_seconds": 4.981700021744473e-05,
+      "total_seconds": 0.003572055999939039
+    },
+    "v0.2.0-scores": {
+      "prepare_seconds": 9.812900043471018e-05,
+      "search_seconds": 0.0033928860002561123,
+      "replay_seconds": 5.198799954087008e-05,
+      "total_seconds": 0.0035444840004856815
+    },
+    "v0.3.0-full": {
+      "prepare_seconds": 9.521399988443591e-05,
+      "search_seconds": 0.0032801789993754937,
+      "replay_seconds": 3.936600023735082e-05,
+      "total_seconds": 0.0034761169999910635
+    },
+    "v0.3.0-scores": {
+      "prepare_seconds": 9.286800013796892e-05,
+      "search_seconds": 0.0033593379994272254,
+      "replay_seconds": 4.3449000258988235e-05,
+      "total_seconds": 0.003495492000183731
+    },
+    "v0.3.0-matrix": {
+      "prepare_seconds": 9.373400007461896e-05,
+      "search_seconds": 0.0029989509994265973,
+      "replay_seconds": 6.524000036733923e-05,
+      "total_seconds": 0.003164044999721227
+    }
+  },
+  "runs": {
+    "v0.2.0-full": [
+      {
+        "mode": "full",
+        "total_seconds": 0.00383289599994896,
+        "prepare_seconds": 9.764100013853749e-05,
+        "search_seconds": 0.003681278999465576,
+        "replay_seconds": 5.39760003448464e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "full",
+        "total_seconds": 0.0035050659998887568,
+        "prepare_seconds": 0.00013414299974101596,
+        "search_seconds": 0.003328605000206153,
+        "replay_seconds": 4.2317999941587914e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "full",
+        "total_seconds": 0.006145264000224415,
+        "prepare_seconds": 0.00012890900052298093,
+        "search_seconds": 0.005947833999925933,
+        "replay_seconds": 6.852099977550097e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "full",
+        "total_seconds": 0.003320302999782143,
+        "prepare_seconds": 0.00010222799937764648,
+        "search_seconds": 0.003168258000187052,
+        "replay_seconds": 4.981700021744473e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "full",
+        "total_seconds": 0.003983317999882274,
+        "prepare_seconds": 9.105099979933584e-05,
+        "search_seconds": 0.003836111000055098,
+        "replay_seconds": 5.615600002784049e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "full",
+        "total_seconds": 0.003572055999939039,
+        "prepare_seconds": 9.898600001179148e-05,
+        "search_seconds": 0.0034283619997950154,
+        "replay_seconds": 4.470800013223197e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "full",
+        "total_seconds": 0.0035533280006347923,
+        "prepare_seconds": 9.404400043422356e-05,
+        "search_seconds": 0.003412416999708512,
+        "replay_seconds": 4.686700049205683e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      }
+    ],
+    "v0.2.0-scores": [
+      {
+        "mode": "scores",
+        "total_seconds": 0.0036938129996997304,
+        "prepare_seconds": 9.768699965206906e-05,
+        "search_seconds": 0.003539156999977422,
+        "replay_seconds": 5.696900007023942e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "scores",
+        "total_seconds": 0.0035444840004856815,
+        "prepare_seconds": 0.00010127099994861055,
+        "search_seconds": 0.0033928860002561123,
+        "replay_seconds": 5.03270002809586e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "scores",
+        "total_seconds": 0.0033049389994630474,
+        "prepare_seconds": 9.951500032912008e-05,
+        "search_seconds": 0.0031593109997629654,
+        "replay_seconds": 4.6112999370961916e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "scores",
+        "total_seconds": 0.0038313830000333837,
+        "prepare_seconds": 0.00010943899997073459,
+        "search_seconds": 0.003664550000394229,
+        "replay_seconds": 5.739399966842029e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "scores",
+        "total_seconds": 0.0032909219999055495,
+        "prepare_seconds": 8.784400051808916e-05,
+        "search_seconds": 0.0031511790002696216,
+        "replay_seconds": 5.1898999117838684e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "scores",
+        "total_seconds": 0.003392065999832994,
+        "prepare_seconds": 9.034800041263225e-05,
+        "search_seconds": 0.0032497299998794915,
+        "replay_seconds": 5.198799954087008e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "scores",
+        "total_seconds": 0.004369307000160916,
+        "prepare_seconds": 9.812900043471018e-05,
+        "search_seconds": 0.004207444999337895,
+        "replay_seconds": 6.373300038831076e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      }
+    ],
+    "v0.3.0-full": [
+      {
+        "mode": "full",
+        "total_seconds": 0.003658746999462892,
+        "prepare_seconds": 9.521399988443591e-05,
+        "search_seconds": 0.003525502999764285,
+        "replay_seconds": 3.802999981417088e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "full",
+        "total_seconds": 0.0034761169999910635,
+        "prepare_seconds": 0.0001551590003145975,
+        "search_seconds": 0.0032801789993754937,
+        "replay_seconds": 4.077900030097226e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "full",
+        "total_seconds": 0.0033535100001245155,
+        "prepare_seconds": 8.968499969341792e-05,
+        "search_seconds": 0.0032282540005326155,
+        "replay_seconds": 3.5570999898482114e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "full",
+        "total_seconds": 0.0037149400004636846,
+        "prepare_seconds": 9.75580005615484e-05,
+        "search_seconds": 0.0035780159996647853,
+        "replay_seconds": 3.936600023735082e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "full",
+        "total_seconds": 0.0033253020001211553,
+        "prepare_seconds": 8.911999975680374e-05,
+        "search_seconds": 0.0031752000004416914,
+        "replay_seconds": 6.098199992266018e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "full",
+        "total_seconds": 0.005455413000163389,
+        "prepare_seconds": 0.00014610299967898754,
+        "search_seconds": 0.005248711000604089,
+        "replay_seconds": 6.0598999880312476e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "full",
+        "total_seconds": 0.003308560000732541,
+        "prepare_seconds": 9.14330003070063e-05,
+        "search_seconds": 0.003181299000061699,
+        "replay_seconds": 3.58280003638356e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      }
+    ],
+    "v0.3.0-scores": [
+      {
+        "mode": "scores",
+        "total_seconds": 0.0033978350002143998,
+        "prepare_seconds": 9.570200018060859e-05,
+        "search_seconds": 0.003258911999182601,
+        "replay_seconds": 4.322100085119018e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "scores",
+        "total_seconds": 0.0032232960002147593,
+        "prepare_seconds": 9.286800013796892e-05,
+        "search_seconds": 0.003085559000282956,
+        "replay_seconds": 4.486899979383452e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "scores",
+        "total_seconds": 0.0033773750001273584,
+        "prepare_seconds": 9.712200062494958e-05,
+        "search_seconds": 0.0031894269995973445,
+        "replay_seconds": 9.082599990506424e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "scores",
+        "total_seconds": 0.0036289119998400565,
+        "prepare_seconds": 8.929500017984537e-05,
+        "search_seconds": 0.0034878540000136127,
+        "replay_seconds": 5.176299964659847e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "scores",
+        "total_seconds": 0.003495492000183731,
+        "prepare_seconds": 9.279799996875226e-05,
+        "search_seconds": 0.0033593379994272254,
+        "replay_seconds": 4.3356000787753146e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "scores",
+        "total_seconds": 0.003762821999771404,
+        "prepare_seconds": 9.424000018043444e-05,
+        "search_seconds": 0.003625485999691591,
+        "replay_seconds": 4.309599989937851e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "scores",
+        "total_seconds": 0.003747229000509833,
+        "prepare_seconds": 8.381300085602561e-05,
+        "search_seconds": 0.003619966999394819,
+        "replay_seconds": 4.3449000258988235e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      }
+    ],
+    "v0.3.0-matrix": [
+      {
+        "mode": "matrix",
+        "total_seconds": 0.0034466070001144544,
+        "prepare_seconds": 0.00014856100005999906,
+        "search_seconds": 0.0032237690002148156,
+        "replay_seconds": 7.427699983963976e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "matrix",
+        "total_seconds": 0.0028112159998272546,
+        "prepare_seconds": 9.277400022256188e-05,
+        "search_seconds": 0.002653473000464146,
+        "replay_seconds": 6.496899914054666e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "matrix",
+        "total_seconds": 0.0029040709996479563,
+        "prepare_seconds": 9.083500026463298e-05,
+        "search_seconds": 0.002752442999735649,
+        "replay_seconds": 6.079299964767415e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "matrix",
+        "total_seconds": 0.0031876650000413065,
+        "prepare_seconds": 9.212500026478665e-05,
+        "search_seconds": 0.003018559999873105,
+        "replay_seconds": 7.697999990341486e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "matrix",
+        "total_seconds": 0.003164044999721227,
+        "prepare_seconds": 9.985399992729072e-05,
+        "search_seconds": 0.0029989509994265973,
+        "replay_seconds": 6.524000036733923e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "matrix",
+        "total_seconds": 0.003350009000314458,
+        "prepare_seconds": 9.373400007461896e-05,
+        "search_seconds": 0.0031870299999354756,
+        "replay_seconds": 6.92450003043632e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      },
+      {
+        "mode": "matrix",
+        "total_seconds": 0.0031037990002005245,
+        "prepare_seconds": 9.645600039220881e-05,
+        "search_seconds": 0.0029441309998219367,
+        "replay_seconds": 6.321199998637894e-05,
+        "evaluations": 16,
+        "failures": 0,
+        "best": [
+          0.9178665376954516,
+          0.004332725510795259
+        ],
+        "score": 17.0
+      }
+    ]
+  }
+}

@@ -1,1 +1,1 @@
-{"batch":true,"models":["integer_tick_fixed_routes","blocking_capacity_one","entry_closures","trace_validation"],"schema":"rail-craft.capabilities/0.1","version":"0.2.0","worker_limit":64}
+{"batch":true,"models":["integer_tick_fixed_routes","blocking_capacity_one","entry_closures","trace_validation"],"schema":"rail-craft.capabilities/0.1","version":"0.3.0","worker_limit":64}
