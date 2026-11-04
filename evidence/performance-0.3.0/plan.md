@@ -101,3 +101,14 @@ save its timing under `rejected/` and try something else.
 - Expected effect: removes the `Value` tree with its string-keyed maps and per-number nodes
   and the second serialization pass. Full `serial` is about twice the lean cost; expect
   1.2x to 1.4x.
+
+### Round 8: scratch pool across calls
+
+- Workload: `one` in matrix mode (`--before-matrix --after-matrix`, one candidate per call,
+  40 calls), round 7 against round 8.
+- Change: `Prepared` keeps a mutex-protected pool of at most 64 `domain::Scratch` sets. The
+  inline caller and each worker take one at the start of a batch and return it at the end,
+  so consecutive single-candidate calls, as issued by optimizers, reuse warm buffers instead
+  of allocating about a dozen vectors per call.
+- Expected effect: removes most allocations of a single-row call (about a quarter of its
+  instructions). Expect 1.1x to 1.3x.

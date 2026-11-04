@@ -8,7 +8,7 @@ use std::{
     collections::HashSet,
     path::PathBuf,
     sync::{
-        OnceLock,
+        Mutex, OnceLock, PoisonError,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -101,23 +101,55 @@ pub struct MatrixScore {
     pub score: Option<f64>,
 }
 
+/// Reusable domain buffers shared by the calls of one `Prepared` evaluator.
+#[derive(Default)]
+struct ScratchPool(Mutex<Vec<domain::Scratch>>);
+
+impl ScratchPool {
+    /// Most scratch sets retained between calls; more concurrent users allocate their own.
+    const LIMIT: usize = 64;
+
+    fn take(&self) -> domain::Scratch {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop()
+            .unwrap_or_default()
+    }
+
+    fn give(&self, scratch: domain::Scratch) {
+        let mut pool = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if pool.len() < Self::LIMIT {
+            pool.push(scratch);
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).len()
+    }
+}
+
 /// Evaluate `count` independent items inline or on scoped workers, in input order.
-/// The inline caller and each worker reuse one domain scratch for all of their items.
+/// The inline caller and each worker reuse one pooled domain scratch for all items.
 fn dispatch<T: Send + Sync>(
+    pool: &ScratchPool,
     count: usize,
     workers: usize,
     evaluate: impl Fn(&mut domain::Scratch, usize) -> T + Sync,
 ) -> Vec<T> {
     if workers == 1 || count == 1 {
-        let mut scratch = domain::Scratch::default();
-        return (0..count).map(|i| evaluate(&mut scratch, i)).collect();
+        let mut scratch = pool.take();
+        let rows = (0..count).map(|i| evaluate(&mut scratch, i)).collect();
+        pool.give(scratch);
+        return rows;
     }
     let next = AtomicUsize::new(0);
     let slots: Vec<_> = (0..count).map(|_| OnceLock::new()).collect();
     std::thread::scope(|scope| {
         for _ in 0..workers.min(count) {
             scope.spawn(|| {
-                let mut scratch = domain::Scratch::default();
+                let mut scratch = pool.take();
                 loop {
                     let index = next.fetch_add(1, Ordering::Relaxed);
                     if index >= count {
@@ -128,6 +160,7 @@ fn dispatch<T: Send + Sync>(
                         "duplicate work index"
                     );
                 }
+                pool.give(scratch);
             });
         }
     });
@@ -208,6 +241,7 @@ struct Batch<'a> {
 pub struct Prepared {
     model: domain::Model,
     model_sha256: String,
+    scratch: ScratchPool,
 }
 impl Prepared {
     pub fn new(model: &str) -> Result<Self, String> {
@@ -216,6 +250,7 @@ impl Prepared {
         Ok(Self {
             model,
             model_sha256,
+            scratch: ScratchPool::default(),
         })
     }
 
@@ -277,22 +312,28 @@ impl Prepared {
             return Err("invalid budget or batch size".into());
         }
         let deadline = budget.deadline();
-        Ok(dispatch(rows, budget.workers, |scratch, row| {
-            let values = &parameters[row * dimension..(row + 1) * dimension];
-            let (result, steps) = self.outcome(scratch, values, false, &budget, deadline, false);
-            match result {
-                Ok((score, _)) => MatrixScore {
-                    status: "complete",
-                    steps,
-                    score: Some(score),
-                },
-                Err(e) => MatrixScore {
-                    status: e.status,
-                    steps,
-                    score: None,
-                },
-            }
-        }))
+        Ok(dispatch(
+            &self.scratch,
+            rows,
+            budget.workers,
+            |scratch, row| {
+                let values = &parameters[row * dimension..(row + 1) * dimension];
+                let (result, steps) =
+                    self.outcome(scratch, values, false, &budget, deadline, false);
+                match result {
+                    Ok((score, _)) => MatrixScore {
+                        status: "complete",
+                        steps,
+                        score: Some(score),
+                    },
+                    Err(e) => MatrixScore {
+                        status: e.status,
+                        steps,
+                        score: None,
+                    },
+                }
+            },
+        ))
     }
 
     fn outcome(
@@ -380,15 +421,20 @@ impl Prepared {
             return Err("at most 16 traced candidates per batch".into());
         }
         let deadline = budget.deadline();
-        let records = dispatch(candidates.len(), budget.workers, |scratch, index| {
-            self.record(
-                scratch,
-                &candidates[index],
-                &budget,
-                deadline,
-                metrics_enabled,
-            )
-        });
+        let records = dispatch(
+            &self.scratch,
+            candidates.len(),
+            budget.workers,
+            |scratch, index| {
+                self.record(
+                    scratch,
+                    &candidates[index],
+                    &budget,
+                    deadline,
+                    metrics_enabled,
+                )
+            },
+        );
         Ok(Batch {
             model_sha256: &self.model_sha256,
             records,
@@ -641,6 +687,62 @@ mod tests {
                 "{budget}"
             );
         }
+    }
+
+    #[test]
+    fn pooled_scratch_matches_fresh_evaluators() {
+        let example = fixture();
+        let model = example["model"].to_string();
+        let mut short = example["model"].clone();
+        short["horizon"] = json!(12);
+        for train in short["trains"].as_array_mut().unwrap() {
+            train["planned"] = json!(5);
+        }
+        let short = short.to_string();
+        let shared = Prepared::new(&model).unwrap();
+        let shared_short = Prepared::new(&short).unwrap();
+        let batches: [(&[f64], &str); 6] = [
+            (&[1.0, 0.0, 0.0, 0.0, 2.0, 1.5], r#"{"workers":3}"#),
+            (&[0.5, 0.25], "{}"),
+            (&[11.0, 0.0, 1.0, 1.0], r#"{"max_steps":9}"#),
+            (
+                &[2.0, 2.0, 3.0, 0.1, 0.2, 0.3, 4.0, 5.0],
+                r#"{"workers":2}"#,
+            ),
+            (&[1.0, 0.0], r#"{"max_steps":21}"#),
+            (&[0.0, 7.0, 9.0, 0.0], "{}"),
+        ];
+        for round in 0..3 {
+            for (parameters, budget) in batches {
+                let rows = parameters.len() / 2;
+                for (text, prepared) in [(&model, &shared), (&short, &shared_short)] {
+                    let fresh = Prepared::new(text).unwrap();
+                    assert_eq!(
+                        prepared.score_matrix(rows, parameters, budget).unwrap(),
+                        fresh.score_matrix(rows, parameters, budget).unwrap(),
+                        "round {round} {budget}"
+                    );
+                    let candidates: Vec<_> = parameters
+                        .chunks(2)
+                        .enumerate()
+                        .map(
+                            |(i, p)| json!({"id": i.to_string(), "parameters": p, "trace": i == 0}),
+                        )
+                        .collect();
+                    let candidates = Value::from(candidates).to_string();
+                    assert_eq!(
+                        prepared.evaluate_json(&candidates, budget).unwrap(),
+                        fresh.evaluate_json(&candidates, budget).unwrap()
+                    );
+                }
+            }
+        }
+        assert!((1..=ScratchPool::LIMIT).contains(&shared.scratch.len()));
+        let pool = ScratchPool::default();
+        for _ in 0..ScratchPool::LIMIT + 3 {
+            pool.give(domain::Scratch::default());
+        }
+        assert_eq!(pool.len(), ScratchPool::LIMIT);
     }
 
     #[test]
