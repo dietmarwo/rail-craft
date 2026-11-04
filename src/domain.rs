@@ -221,15 +221,34 @@ struct ResourceState {
     closures: u32,
 }
 
+/// Dispatch data of one train, interleaved so a ranking pass reads one record.
+#[derive(Clone, Copy, Default)]
+struct Contender {
+    /// Priority weight times the train's declared priority.
+    weighted: f64,
+    /// Waiting start as `f64`; ticks are integers below 2^53, so this is exact.
+    since: f64,
+    /// `tie_tail` of the waiting start and train index.
+    tail: u64,
+}
+
+/// One contender record per possible train (models have at most 128 trains), indexed by
+/// `train & 127` so the ranking pass needs no bounds checks.
+struct Contenders(Box<[Contender; 128]>);
+
+impl Default for Contenders {
+    fn default() -> Self {
+        Self(Box::new([Contender::default(); 128]))
+    }
+}
+
 /// Reusable per-worker buffers for `evaluate`. Every buffer is reset before use, so one
 /// scratch can serve any sequence of candidates and models.
 #[derive(Default)]
 pub struct Scratch {
     trains: Vec<TrainState>,
     resources: Vec<ResourceState>,
-    weighted_priority: Vec<f64>,
-    since_of: Vec<u64>,
-    tail_of: Vec<u64>,
+    contenders: Contenders,
     ready_on: Vec<u128>,
     events: BinaryHeap<Reverse<u64>>,
     intervals: Vec<Interval>,
@@ -261,9 +280,7 @@ pub fn evaluate(
     let Scratch {
         trains,
         resources,
-        weighted_priority,
-        since_of,
-        tail_of,
+        contenders: Contenders(table),
         ready_on,
         events,
         intervals,
@@ -274,13 +291,10 @@ pub fn evaluate(
     trains.resize_with(n, TrainState::default);
     resources.clear();
     resources.resize_with(model.resources.len(), ResourceState::default);
-    weighted_priority.clear();
-    weighted_priority.extend(model.trains.iter().map(|t| priority * t.priority));
-    // Dense dispatch state: waiting start and tie-break tail per ready train.
-    since_of.clear();
-    since_of.resize(n, 0);
-    tail_of.clear();
-    tail_of.resize(n, 0);
+    // Waiting starts and tails are written whenever a train becomes ready.
+    for (entry, train) in table.iter_mut().zip(&model.trains) {
+        entry.weighted = priority * train.priority;
+    }
     // Prepared static events are merged with completions and clearance wakes.
     let timeline = model.timeline.as_slice();
     let mut cursor = 0;
@@ -358,8 +372,9 @@ pub fn evaluate(
                         let r = model.trains[i].route[state.next].resource;
                         ready_on[r] |= 1_u128 << i;
                         waiting_resources |= 1_u128 << r;
-                        since_of[i] = time;
-                        tail_of[i] = tie_tail(time, i);
+                        let entry = &mut table[i & 127];
+                        entry.since = time as f64;
+                        entry.tail = tie_tail(time, i);
                     }
                 }
                 CLOSURE_END => resources[model.closures[i].resource].closures -= 1,
@@ -368,8 +383,9 @@ pub fn evaluate(
                     let r = model.trains[i].route[0].resource;
                     ready_on[r] |= 1_u128 << i;
                     waiting_resources |= 1_u128 << r;
-                    since_of[i] = time;
-                    tail_of[i] = tie_tail(time, i);
+                    let entry = &mut table[i & 127];
+                    entry.since = time as f64;
+                    entry.tail = tie_tail(time, i);
                 }
                 _ => {}
             }
@@ -380,6 +396,7 @@ pub fn evaluate(
             // `order_key` is zero only for one NaN pattern and scores are finite, so
             // a zero maximum means that no train is eligible.
             let mut best = 0_u128;
+            let now = time as f64;
             let mut open = waiting_resources;
             while open != 0 {
                 let r = open.trailing_zeros() as usize;
@@ -391,12 +408,11 @@ pub fn evaluate(
                 }
                 let mut contenders = ready_on[r];
                 while contenders != 0 {
-                    let i = contenders.trailing_zeros() as usize;
+                    let entry = &table[contenders.trailing_zeros() as usize & 127];
                     contenders &= contenders - 1;
-                    // The wait is below 2^63, so the i64 conversion equals the u64 one.
-                    let wait = (time - since_of[i]) as i64 as f64;
-                    let score = weighted_priority[i] + age * wait;
-                    let key = (u128::from(order_key(score)) << 64) | u128::from(tail_of[i]);
+                    // Both ticks are exact integers in f64, so the difference is the wait.
+                    let score = entry.weighted + age * (now - entry.since);
+                    let key = (u128::from(order_key(score)) << 64) | u128::from(entry.tail);
                     best = best.max(key);
                 }
             }

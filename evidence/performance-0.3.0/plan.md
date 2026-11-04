@@ -112,3 +112,15 @@ save its timing under `rejected/` and try something else.
   of allocating about a dozen vectors per call.
 - Expected effect: removes most allocations of a single-row call (about a quarter of its
   instructions). Expect 1.1x to 1.3x.
+
+### Round 9: dense contender table
+
+- Workload: lean `domain` (`--before-scores --after-scores`, 48 candidates, 110 trains),
+  round 8 against round 9.
+- Change: replace the three per-train dispatch vectors (weighted priority, waiting start,
+  tie-break tail) with one fixed 128-entry table of interleaved records indexed by
+  `train & 127`, so the scan needs no bounds checks and touches one record per contender.
+  The waiting start is also stored as `f64`; ticks are integers below 2^53, so
+  `time_f64 - since_f64` is exact and equals the former `(time - since) as f64`.
+- Expected effect: about 17% of lean `domain` instructions are bounds checks in the scan,
+  plus a conversion per contender. Expect 1.1x to 1.3x.
