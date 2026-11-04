@@ -28,3 +28,13 @@ save its timing under `rejected/` and try something else.
   (lean `scores_json`). After: round 1 with `--after-matrix` (`score_matrix`).
 - Expected effect: removes candidate JSON decoding, ID checks and record JSON encoding;
   expect a large gain (more than 1.3x) because the example kernel is small.
+
+### Round 2: per-resource ready masks in the dispatcher
+
+- Workload: `domain` (48 full records, 110 trains on one resource), round 1 against round 2.
+- Change: keep one 128-bit ready mask per resource (trains whose next leg uses it) and a
+  128-bit mask of resources with waiting trains. A dispatch pass checks each such resource's
+  availability once and ranks only the trains waiting for available resources. The ranking
+  key stays (score, earlier waiting start, lower train index), now compared explicitly.
+- Expected effect: most passes happen while the single block is owned or in clearance; those
+  passes become O(1) instead of a scan over about 100 waiting trains. Expect more than 1.5x.
