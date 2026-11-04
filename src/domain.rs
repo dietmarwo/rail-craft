@@ -143,9 +143,23 @@ pub fn prepare(mut model: Model) -> Result<Model, String> {
 #[derive(Default)]
 struct TrainState {
     next: usize,
-    waiting_since: u64,
     held: Option<Interval>,
     arrival: Option<u64>,
+}
+
+/// Map a finite score to an unsigned integer with the same order as `f64::total_cmp`.
+#[inline]
+fn order_key(score: f64) -> u64 {
+    let bits = score.to_bits();
+    bits ^ ((((bits as i64) >> 63) as u64) | (1 << 63))
+}
+
+/// Tie-break tail of a ready train: an earlier waiting start ranks higher, then a lower
+/// train index. Waiting starts never exceed the horizon (at most 10^9 < 2^57) and train
+/// indexes are below 128, so the tail fits in 64 bits.
+#[inline]
+fn tie_tail(waiting_since: u64, train: usize) -> u64 {
+    (((1_u64 << 57) - 1 - waiting_since) << 7) | (127 - train as u64)
 }
 #[derive(Default)]
 struct ResourceState {
@@ -168,6 +182,9 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
         .map(|_| ResourceState::default())
         .collect();
     let weighted_priority: Vec<_> = model.trains.iter().map(|t| priority * t.priority).collect();
+    // Dense dispatch state: waiting start and tie-break tail per ready train.
+    let mut since_of = vec![0_u64; model.trains.len()];
+    let mut tail_of = vec![0_u64; model.trains.len()];
     let mut events = model.initial_events.clone();
     let mut intervals = Vec::new();
     let mut completed = 0;
@@ -222,7 +239,8 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
                         let r = model.trains[i].route[state.next].resource;
                         ready_on[r] |= 1_u128 << i;
                         waiting_resources |= 1_u128 << r;
-                        state.waiting_since = time;
+                        since_of[i] = time;
+                        tail_of[i] = tie_tail(time, i);
                     }
                 }
                 1 => resources[model.closures[i].resource].closures -= 1,
@@ -231,7 +249,8 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
                     let r = model.trains[i].route[0].resource;
                     ready_on[r] |= 1_u128 << i;
                     waiting_resources |= 1_u128 << r;
-                    trains[i].waiting_since = time;
+                    since_of[i] = time;
+                    tail_of[i] = tie_tail(time, i);
                 }
                 _ => {}
             }
@@ -239,7 +258,9 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
         loop {
             // Rank (score, earlier waiting start, lower train index) over trains whose
             // next resource is available. Blocked resources are skipped as a group.
-            let mut best = None::<(usize, u64, f64)>;
+            // `order_key` is zero only for one NaN pattern and scores are finite, so
+            // a zero maximum means that no train is eligible.
+            let mut best = 0_u128;
             let mut open = waiting_resources;
             while open != 0 {
                 let r = open.trailing_zeros() as usize;
@@ -253,20 +274,17 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
                 while contenders != 0 {
                     let i = contenders.trailing_zeros() as usize;
                     contenders &= contenders - 1;
-                    let since = trains[i].waiting_since;
-                    let score = weighted_priority[i] + age * (time - since) as f64;
-                    if best.is_none_or(|(previous_i, previous_since, previous)| {
-                        score
-                            .total_cmp(&previous)
-                            .then_with(|| previous_since.cmp(&since))
-                            .then_with(|| previous_i.cmp(&i))
-                            .is_gt()
-                    }) {
-                        best = Some((i, since, score));
-                    }
+                    // The wait is below 2^63, so the i64 conversion equals the u64 one.
+                    let wait = (time - since_of[i]) as i64 as f64;
+                    let score = weighted_priority[i] + age * wait;
+                    let key = (u128::from(order_key(score)) << 64) | u128::from(tail_of[i]);
+                    best = best.max(key);
                 }
             }
-            let Some((i, _, _)) = best else { break };
+            if best == 0 {
+                break;
+            }
+            let i = 127 - (best as usize & 127);
             if let Err(e) = work.step() {
                 return Err(e.with_metrics(
                     json!({"closed_intervals":trace.then_some(&intervals),"completed":completed,"time":time}),
@@ -387,6 +405,14 @@ mod tests {
     use super::*;
     use crate::Budget;
     use serde_json::Value;
+
+    #[derive(Default)]
+    struct TrainState {
+        next: usize,
+        waiting_since: u64,
+        held: Option<Interval>,
+        arrival: Option<u64>,
+    }
 
     /// The 0.2.0 dispatcher and verifier, kept verbatim apart from building its own
     /// event heap, as an oracle for structural changes to `evaluate`.
@@ -635,6 +661,35 @@ mod tests {
             Err(e) => json!({"status": e.status, "detail": e.detail, "metrics": e.metrics,
                              "steps": work.used}),
         }
+    }
+
+    #[test]
+    fn ranking_keys_follow_total_order_and_tie_breaks() {
+        let values = [
+            -1e300,
+            -2.5,
+            -f64::MIN_POSITIVE,
+            -0.0,
+            0.0,
+            f64::from_bits(1),
+            f64::MIN_POSITIVE,
+            0.125,
+            1.0,
+            1.0 + f64::EPSILON,
+            9_999.0,
+            1e300,
+        ];
+        for a in values {
+            assert_ne!(order_key(a), 0);
+            for b in values {
+                assert_eq!(order_key(a).cmp(&order_key(b)), a.total_cmp(&b), "{a} {b}");
+            }
+        }
+        assert!(tie_tail(3, 7) > tie_tail(4, 0));
+        assert!(tie_tail(3, 7) > tie_tail(3, 8));
+        assert!(tie_tail(1_000_000_000, 127) > 0);
+        assert_eq!(127 - (tie_tail(1_000_000_000, 127) & 127), 127);
+        assert_eq!(127 - (tie_tail(0, 0) & 127), 0);
     }
 
     #[test]

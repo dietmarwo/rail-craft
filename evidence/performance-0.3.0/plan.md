@@ -38,3 +38,15 @@ save its timing under `rejected/` and try something else.
   key stays (score, earlier waiting start, lower train index), now compared explicitly.
 - Expected effect: most passes happen while the single block is owned or in clearance; those
   passes become O(1) instead of a scan over about 100 waiting trains. Expect more than 1.5x.
+
+### Round 3: rank contenders with one integer key
+
+- Workload: `domain` in matrix mode (`--before-matrix --after-matrix`, 48 candidates,
+  110 trains), round 2 against round 3.
+- Change: store waiting starts in a dense array and precompute a 64-bit tie-break tail
+  (later waiting start loses, then higher index loses) when a train becomes ready. Each
+  contender's score is mapped to a total-order integer and combined with the tail into one
+  u128, so ranking is a single unsigned maximum. The age term converts the wait through
+  `i64`, which yields the same `f64` for every possible wait.
+- Expected effect: the per-contender comparator chain is the largest remaining cost
+  (about 60% of instructions). Expect 1.2x to 1.4x.
