@@ -1,0 +1,208 @@
+From 238957b1a86e0f3593cac3419892ad06eb88ca74 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 11:54:23 -0400
+Subject: [PATCH 09/15] Round 9: Rank from a dense fixed-size contender table
+
+Replace the per-train weighted-priority, waiting-start and tail vectors
+with one 128-entry table of interleaved records indexed by train & 127,
+so the ranking pass has no bounds checks and reads one record per
+contender. Waiting starts are stored as exact f64 integers, so the
+f64 difference equals the former integer wait conversion. The
+independent domain validation passed against this round's CLI.
+
+Workload: lean domain (48 candidates, 110 trains), 11 samples.
+Before median: 1.029 ms. After median: 0.902 ms. Speedup: 1.14x.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ evidence/performance-0.3.0/plan.md            | 12 ++++
+ .../round09-lean-domain.json                  | 36 +++++++++++
+ src/domain.rs                                 | 60 ++++++++++++-------
+ 3 files changed, 86 insertions(+), 22 deletions(-)
+ create mode 100644 evidence/performance-0.3.0/round09-lean-domain.json
+
+diff --git a/evidence/performance-0.3.0/plan.md b/evidence/performance-0.3.0/plan.md
+index 2c9d6ad..19856f4 100644
+--- a/evidence/performance-0.3.0/plan.md
++++ b/evidence/performance-0.3.0/plan.md
+@@ -112,3 +112,15 @@ save its timing under `rejected/` and try something else.
+   of allocating about a dozen vectors per call.
+ - Expected effect: removes most allocations of a single-row call (about a quarter of its
+   instructions). Expect 1.1x to 1.3x.
++
++### Round 9: dense contender table
++
++- Workload: lean `domain` (`--before-scores --after-scores`, 48 candidates, 110 trains),
++  round 8 against round 9.
++- Change: replace the three per-train dispatch vectors (weighted priority, waiting start,
++  tie-break tail) with one fixed 128-entry table of interleaved records indexed by
++  `train & 127`, so the scan needs no bounds checks and touches one record per contender.
++  The waiting start is also stored as `f64`; ticks are integers below 2^53, so
++  `time_f64 - since_f64` is exact and equals the former `(time - since) as f64`.
++- Expected effect: about 17% of lean `domain` instructions are bounds checks in the scan,
++  plus a conversion per contender. Expect 1.1x to 1.3x.
+diff --git a/evidence/performance-0.3.0/round09-lean-domain.json b/evidence/performance-0.3.0/round09-lean-domain.json
+new file mode 100644
+index 0000000..d8cfb15
+--- /dev/null
++++ b/evidence/performance-0.3.0/round09-lean-domain.json
+@@ -0,0 +1,36 @@
++{
++  "workload": "domain",
++  "before_mode": "scores",
++  "after_mode": "scores",
++  "before_seconds": [
++    0.0008105962,
++    0.0008052231999999999,
++    0.0007926806,
++    0.0010293662,
++    0.0010271736,
++    0.001682757,
++    0.0016461455999999999,
++    0.0015945622,
++    0.0010274408,
++    0.0010794425999999999,
++    0.0010629618000000001
++  ],
++  "after_seconds": [
++    0.0006958438,
++    0.0006877124,
++    0.0009732064,
++    0.000902291,
++    0.0008954078,
++    0.0008891262,
++    0.0013846492,
++    0.0013762352,
++    0.0009017848,
++    0.0008993604,
++    0.0009075563999999999
++  ],
++  "medians_seconds": [
++    0.0010293662,
++    0.0009017848
++  ],
++  "speedup": 1.1414765473980044
++}
+diff --git a/src/domain.rs b/src/domain.rs
+index e8166ad..b40d89c 100644
+--- a/src/domain.rs
++++ b/src/domain.rs
+@@ -221,15 +221,34 @@ struct ResourceState {
+     closures: u32,
+ }
+ 
++/// Dispatch data of one train, interleaved so a ranking pass reads one record.
++#[derive(Clone, Copy, Default)]
++struct Contender {
++    /// Priority weight times the train's declared priority.
++    weighted: f64,
++    /// Waiting start as `f64`; ticks are integers below 2^53, so this is exact.
++    since: f64,
++    /// `tie_tail` of the waiting start and train index.
++    tail: u64,
++}
++
++/// One contender record per possible train (models have at most 128 trains), indexed by
++/// `train & 127` so the ranking pass needs no bounds checks.
++struct Contenders(Box<[Contender; 128]>);
++
++impl Default for Contenders {
++    fn default() -> Self {
++        Self(Box::new([Contender::default(); 128]))
++    }
++}
++
+ /// Reusable per-worker buffers for `evaluate`. Every buffer is reset before use, so one
+ /// scratch can serve any sequence of candidates and models.
+ #[derive(Default)]
+ pub struct Scratch {
+     trains: Vec<TrainState>,
+     resources: Vec<ResourceState>,
+-    weighted_priority: Vec<f64>,
+-    since_of: Vec<u64>,
+-    tail_of: Vec<u64>,
++    contenders: Contenders,
+     ready_on: Vec<u128>,
+     events: BinaryHeap<Reverse<u64>>,
+     intervals: Vec<Interval>,
+@@ -261,9 +280,7 @@ pub fn evaluate(
+     let Scratch {
+         trains,
+         resources,
+-        weighted_priority,
+-        since_of,
+-        tail_of,
++        contenders: Contenders(table),
+         ready_on,
+         events,
+         intervals,
+@@ -274,13 +291,10 @@ pub fn evaluate(
+     trains.resize_with(n, TrainState::default);
+     resources.clear();
+     resources.resize_with(model.resources.len(), ResourceState::default);
+-    weighted_priority.clear();
+-    weighted_priority.extend(model.trains.iter().map(|t| priority * t.priority));
+-    // Dense dispatch state: waiting start and tie-break tail per ready train.
+-    since_of.clear();
+-    since_of.resize(n, 0);
+-    tail_of.clear();
+-    tail_of.resize(n, 0);
++    // Waiting starts and tails are written whenever a train becomes ready.
++    for (entry, train) in table.iter_mut().zip(&model.trains) {
++        entry.weighted = priority * train.priority;
++    }
+     // Prepared static events are merged with completions and clearance wakes.
+     let timeline = model.timeline.as_slice();
+     let mut cursor = 0;
+@@ -358,8 +372,9 @@ pub fn evaluate(
+                         let r = model.trains[i].route[state.next].resource;
+                         ready_on[r] |= 1_u128 << i;
+                         waiting_resources |= 1_u128 << r;
+-                        since_of[i] = time;
+-                        tail_of[i] = tie_tail(time, i);
++                        let entry = &mut table[i & 127];
++                        entry.since = time as f64;
++                        entry.tail = tie_tail(time, i);
+                     }
+                 }
+                 CLOSURE_END => resources[model.closures[i].resource].closures -= 1,
+@@ -368,8 +383,9 @@ pub fn evaluate(
+                     let r = model.trains[i].route[0].resource;
+                     ready_on[r] |= 1_u128 << i;
+                     waiting_resources |= 1_u128 << r;
+-                    since_of[i] = time;
+-                    tail_of[i] = tie_tail(time, i);
++                    let entry = &mut table[i & 127];
++                    entry.since = time as f64;
++                    entry.tail = tie_tail(time, i);
+                 }
+                 _ => {}
+             }
+@@ -380,6 +396,7 @@ pub fn evaluate(
+             // `order_key` is zero only for one NaN pattern and scores are finite, so
+             // a zero maximum means that no train is eligible.
+             let mut best = 0_u128;
++            let now = time as f64;
+             let mut open = waiting_resources;
+             while open != 0 {
+                 let r = open.trailing_zeros() as usize;
+@@ -391,12 +408,11 @@ pub fn evaluate(
+                 }
+                 let mut contenders = ready_on[r];
+                 while contenders != 0 {
+-                    let i = contenders.trailing_zeros() as usize;
++                    let entry = &table[contenders.trailing_zeros() as usize & 127];
+                     contenders &= contenders - 1;
+-                    // The wait is below 2^63, so the i64 conversion equals the u64 one.
+-                    let wait = (time - since_of[i]) as i64 as f64;
+-                    let score = weighted_priority[i] + age * wait;
+-                    let key = (u128::from(order_key(score)) << 64) | u128::from(tail_of[i]);
++                    // Both ticks are exact integers in f64, so the difference is the wait.
++                    let score = entry.weighted + age * (now - entry.since);
++                    let key = (u128::from(order_key(score)) << 64) | u128::from(entry.tail);
+                     best = best.max(key);
+                 }
+             }
+-- 
+2.43.0
+
