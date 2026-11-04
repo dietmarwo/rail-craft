@@ -50,3 +50,14 @@ save its timing under `rejected/` and try something else.
   `i64`, which yields the same `f64` for every possible wait.
 - Expected effect: the per-contender comparator chain is the largest remaining cost
   (about 60% of instructions). Expect 1.2x to 1.4x.
+
+### Round 4: static event timeline and packed dynamic heap
+
+- Workload: `domain2` (48 full records, 100 trains, 300 closures), round 3 against round 4.
+- Change: releases and closure starts and ends do not depend on the candidate. Sort them once
+  at preparation into a timeline of packed `u64` keys (tick, kind, index), which preserve the
+  tuple order. Each candidate walks the timeline with a cursor and merges it with a small
+  binary heap that holds only service completions and clearance wakes. This removes the
+  per-candidate heap clone and the logarithmic pops of 700 static events.
+- Expected effect: heap work is about 19% of `domain2` instructions after round 3, plus the
+  clone. Expect 1.1x to 1.25x.
