@@ -1,0 +1,42 @@
+scored 1681 policies in 3.9 ms (2.33 us per policy), 267279 logical steps
+
+policy                          weights        weighted delay
+FIFO by waiting age [0, 1]      [0.00, 1.00]       921
+priority only [1, 0]            [1.00, 0.00]       628
+equal weights [1, 1]            [1.00, 1.00]       841
+grid best                       [4.00, 0.25]       613
+
+scores by priority/age ratio, rounded to 0.1 (age weight > 0)
+  ratio   0.0:  62 policies, min    921, max    921
+  ratio   0.5:  80 policies, min    921, max    921
+  ratio   1.0:  82 policies, min    779, max    841
+  ratio   2.0:  21 policies, min    779, max    779
+  ratio   4.0:  10 policies, min    664, max    664
+  ratio   8.0:   5 policies, min    623, max    623
+  ratio  16.0:   2 policies, min    613, max    613
+  ratio  40.0:   1 policies, min    628, max    628
+
+score map (rows: priority weight 0..10, columns: age weight 0..10)
+  p= 0.00 |@@@@@@@@@@@@@@@@@@@@@|
+  p= 1.25 | -+#@@@@@@@@@@@@@@@@@|
+  p= 2.50 |  -++##@@@@@@@@@@@@@@|
+  p= 3.75 |  .-++++##@@@@@@@@@@@|
+  p= 5.00 |   .-+++++####@@@@@@@|
+  p= 6.25 |    .--++++++####@@@@|
+  p= 7.50 |    .---+++++++#####@|
+  p= 8.75 |     .---+++++++++###|
+  p=10.00 |     ..---++++++++++#|
+
+replay of grid best: score 613, max delay 53, 12 of 16 trains late
+  W01 priority 1: 15 ticks late
+  W03 priority 0: 52 ticks late
+  W05 priority 4: 14 ticks late
+  E06 priority 0: 42 ticks late
+  W07 priority 1: 31 ticks late
+  W09 priority 0: 53 ticks late
+  E10 priority 2: 16 ticks late
+  W11 priority 4: 10 ticks late
+  E12 priority 0: 43 ticks late
+  W13 priority 1: 27 ticks late
+  E14 priority 3: 15 ticks late
+  W15 priority 0: 49 ticks late

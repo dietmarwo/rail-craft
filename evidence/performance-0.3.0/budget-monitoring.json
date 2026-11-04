@@ -1,0 +1,22 @@
+{
+  "host": "2 vCPUs, Intel Xeon @ 2.10GHz, CPython 3.12, development wheel built from the 0.3.0 source",
+  "method": "Prepared.score_matrix with one worker, median of 11 loops of 20 calls",
+  "results": {
+    "example, 96 rows": {
+      "steps_per_row": 21,
+      "median_seconds_per_call": {
+        "default": 5.412380000962003e-05,
+        "wall_ms=60000": 0.00011761040000237699,
+        "cancel_file (absent)": 0.0007663789499929407
+      }
+    },
+    "16-train corridor, 96 rows": {
+      "steps_per_row": 159,
+      "median_seconds_per_call": {
+        "default": 0.0002882285499708814,
+        "wall_ms=60000": 0.0008794814999873779,
+        "cancel_file (absent)": 0.005955101750032554
+      }
+    }
+  }
+}

@@ -1,4 +1,8 @@
-"""Check the installed lean API and run the Python snippets in the tutorial."""
+"""Check the installed lean and matrix APIs and run the Python blocks of the docs.
+
+Usage: release_checks.py MODULE TUTORIAL [MANUAL]. The tutorial's blocks run in one
+namespace; the manual's blocks run in a second namespace inside a temporary directory.
+"""
 
 import importlib
 import json
@@ -8,7 +12,7 @@ import re
 import sys
 from tempfile import TemporaryDirectory
 
-module, tutorial = sys.argv[1:]
+module, tutorial, *manual = sys.argv[1:]
 package = importlib.import_module(module)
 example = package.load_example()
 prepared = package.Prepared(example["model"])
@@ -90,5 +94,23 @@ assert len(snippets) >= 4
 namespace = {}
 for i, snippet in enumerate(snippets, 1):
     exec(compile(snippet, f"tutorial-{i}", "exec"), namespace)
-print(json.dumps({"status": "passed", "tutorial_python_blocks": len(snippets),
-                  "lean_api_and_budget_parity": True, "matrix_api_parity": True}))
+report = {"status": "passed", "tutorial_python_blocks": len(snippets),
+          "lean_api_and_budget_parity": True, "matrix_api_parity": True}
+if manual:
+    import contextlib
+    import io
+    import os
+
+    blocks = re.findall(r"^```python\n(.*?)^```", Path(manual[0]).read_text(), re.M | re.S)
+    assert len(blocks) >= 10, len(blocks)
+    namespace, here = {}, os.getcwd()
+    with TemporaryDirectory() as folder:
+        os.chdir(folder)
+        try:
+            for i, block in enumerate(blocks, 1):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    exec(compile(block, f"manual-{i}", "exec"), namespace)
+        finally:
+            os.chdir(here)
+    report["manual_python_blocks"] = len(blocks)
+print(json.dumps(report))
