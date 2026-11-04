@@ -1,0 +1,109 @@
+{
+  "baseline_delay": 40.0,
+  "corruption_checks": 5,
+  "deadlock_detected": true,
+  "exact_delay": 16,
+  "holdout_baseline": [
+    49.0,
+    25.0,
+    37.0,
+    49.0,
+    49.0,
+    37.0
+  ],
+  "holdout_failed": 0,
+  "holdout_max_delays": [
+    9,
+    5,
+    7,
+    9,
+    9,
+    7
+  ],
+  "holdout_optimized": [
+    29.0,
+    5.0,
+    17.0,
+    29.0,
+    29.0,
+    17.0
+  ],
+  "policy_candidates": 6,
+  "tick_reference_matches": true,
+  "tiny_references": [
+    {
+      "optimum": 16,
+      "orderings": 6,
+      "trains": 3
+    },
+    {
+      "optimum": 40,
+      "orderings": 24,
+      "trains": 4
+    },
+    {
+      "optimum": 80,
+      "orderings": 120,
+      "trains": 5
+    },
+    {
+      "optimum": 140,
+      "orderings": 720,
+      "trains": 6
+    }
+  ],
+  "trace": [
+    {
+      "entry": 0,
+      "exit": 5,
+      "leg": 0,
+      "resource": 1,
+      "service_end": 1,
+      "train": 1
+    },
+    {
+      "entry": 5,
+      "exit": 9,
+      "leg": 1,
+      "resource": 2,
+      "service_end": 9,
+      "train": 1
+    },
+    {
+      "entry": 0,
+      "exit": 10,
+      "leg": 0,
+      "resource": 0,
+      "service_end": 1,
+      "train": 0
+    },
+    {
+      "entry": 9,
+      "exit": 12,
+      "leg": 2,
+      "resource": 4,
+      "service_end": 12,
+      "train": 1
+    },
+    {
+      "entry": 10,
+      "exit": 14,
+      "leg": 1,
+      "resource": 2,
+      "service_end": 14,
+      "train": 0
+    },
+    {
+      "entry": 14,
+      "exit": 17,
+      "leg": 2,
+      "resource": 3,
+      "service_end": 17,
+      "train": 0
+    }
+  ],
+  "winner": [
+    1,
+    0
+  ]
+}
