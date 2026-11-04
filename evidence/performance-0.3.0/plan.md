@@ -90,3 +90,14 @@ save its timing under `rejected/` and try something else.
   metrics are requested; the score keeps the same summation order.
 - Expected effect: about 20 allocations and frees per candidate disappear; in the small
   example they are about a third of the instructions. Expect 1.2x to 1.5x.
+
+### Round 7: typed metrics encoded once
+
+- Workload: `serial` with full records (96 candidates, one worker), round 6 against round 7.
+- Change: build metrics from typed structs whose fields are declared in the sorted key order
+  of the former `serde_json::Value` maps (the `Interval` fields are reordered the same way),
+  encode them once into a `Box<RawValue>`, and splice that raw JSON into the record. The
+  CLI still converts the batch to a `Value`, so its output keeps the same key order.
+- Expected effect: removes the `Value` tree with its string-keyed maps and per-number nodes
+  and the second serialization pass. Full `serial` is about twice the lean cost; expect
+  1.2x to 1.4x.

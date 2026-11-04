@@ -59,15 +59,43 @@ struct Closure {
     end: u64,
 }
 
+/// One movement. Fields are declared in sorted key order, so typed serialization
+/// emits the same bytes as the sorted `serde_json::Value` maps used before 0.3.0.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Interval {
-    train: usize,
+    entry: u64,
+    exit: u64,
     leg: usize,
     resource: usize,
-    entry: u64,
     service_end: u64,
-    exit: u64,
+    train: usize,
+}
+
+/// Metrics of a complete schedule, in sorted key order.
+#[derive(Serialize)]
+struct CompleteMetrics<'a> {
+    completed: usize,
+    delays: &'a [u64],
+    intervals: Option<&'a [Interval]>,
+    max_delay: Option<&'a u64>,
+}
+
+/// Metrics at a work, deadline or cancellation stop, in sorted key order.
+#[derive(Serialize)]
+struct StopMetrics<'a> {
+    closed_intervals: Option<&'a [Interval]>,
+    completed: usize,
+    time: u64,
+}
+
+/// Metrics of an unfinished schedule, in sorted key order.
+#[derive(Serialize)]
+struct UnfinishedMetrics<'a> {
+    active: Option<Vec<&'a Interval>>,
+    closed_intervals: Option<&'a [Interval]>,
+    completed: usize,
+    time: u64,
 }
 
 /// Event kinds in processing order at one tick.
@@ -301,9 +329,11 @@ pub fn evaluate(
                 break;
             }
             if let Err(e) = work.step() {
-                return Err(e.with_metrics(
-                    json!({"closed_intervals": trace.then_some(&intervals), "completed":completed, "time":time}),
-                ));
+                return Err(e.with_metrics(&StopMetrics {
+                    closed_intervals: trace.then_some(&intervals[..]),
+                    completed,
+                    time,
+                }));
             }
             if from_timeline {
                 cursor += 1;
@@ -375,9 +405,11 @@ pub fn evaluate(
             }
             let i = 127 - (best as usize & 127);
             if let Err(e) = work.step() {
-                return Err(e.with_metrics(
-                    json!({"closed_intervals":trace.then_some(&intervals),"completed":completed,"time":time}),
-                ));
+                return Err(e.with_metrics(&StopMetrics {
+                    closed_intervals: trace.then_some(&intervals[..]),
+                    completed,
+                    time,
+                }));
             }
             let state = &mut trains[i];
             if let Some(previous) = state.held.take() {
@@ -412,9 +444,12 @@ pub fn evaluate(
         } else {
             "horizon"
         };
-        return Err(infeasible(reason).with_metrics(
-            json!({"completed":completed,"time":time,"closed_intervals":trace.then_some(&intervals),"active":trace.then_some(active)}),
-        ));
+        return Err(infeasible(reason).with_metrics(&UnfinishedMetrics {
+            active: trace.then_some(active),
+            closed_intervals: trace.then_some(&intervals[..]),
+            completed,
+            time,
+        }));
     }
     validate_with(model, intervals, verify).map_err(invalid)?;
     let delay =
@@ -428,9 +463,14 @@ pub fn evaluate(
     Ok((
         score,
         work.metrics(|| {
-            let delay: Vec<_> = trains.iter().zip(&model.trains).map(delay).collect();
-            json!({"completed":completed,"max_delay":delay.iter().max(),"delays":delay,
-        "intervals":trace.then_some(&*intervals)})
+            let delays: Vec<_> = trains.iter().zip(&model.trains).map(delay).collect();
+            let metrics = CompleteMetrics {
+                completed,
+                delays: &delays,
+                intervals: trace.then_some(&intervals[..]),
+                max_delay: delays.iter().max(),
+            };
+            crate::encode_metrics(&metrics)
         }),
     ))
 }
@@ -602,7 +642,7 @@ mod tests {
             while events.peek().is_some_and(|Reverse((t, _, _))| *t == at) {
                 if let Err(e) = work.step() {
                     return Err(e.with_metrics(
-                        json!({"closed_intervals": trace.then_some(&intervals), "completed":completed, "time":time}),
+                        &json!({"closed_intervals": trace.then_some(&intervals), "completed":completed, "time":time}),
                     ));
                 }
                 let Reverse((_, kind, i)) = events.pop().expect("peeked event");
@@ -661,7 +701,7 @@ mod tests {
                 let Some((i, _, _)) = best else { break };
                 if let Err(e) = work.step() {
                     return Err(e.with_metrics(
-                        json!({"closed_intervals":trace.then_some(&intervals),"completed":completed,"time":time}),
+                        &json!({"closed_intervals":trace.then_some(&intervals),"completed":completed,"time":time}),
                     ));
                 }
                 let state = &mut trains[i];
@@ -695,7 +735,7 @@ mod tests {
                 "horizon"
             };
             return Err(infeasible(reason).with_metrics(
-                json!({"completed":completed,"time":time,"closed_intervals":trace.then_some(&intervals),"active":trace.then_some(active)}),
+                &json!({"completed":completed,"time":time,"closed_intervals":trace.then_some(&intervals),"active":trace.then_some(active)}),
             ));
         }
         reference_validate(model, &intervals).map_err(invalid)?;
@@ -712,8 +752,10 @@ mod tests {
         Ok((
             score,
             work.metrics(|| {
-                json!({"completed":completed,"max_delay":delay.iter().max(),"delays":delay,
-            "intervals":trace.then_some(intervals)})
+                crate::encode_metrics(
+                    &json!({"completed":completed,"max_delay":delay.iter().max(),"delays":delay,
+            "intervals":trace.then_some(intervals)}),
+                )
             }),
         ))
     }
@@ -964,6 +1006,53 @@ mod tests {
             }
         }
         assert_eq!(verdicts.len(), 6, "{verdicts:?}");
+    }
+
+    #[test]
+    fn typed_metrics_keep_sorted_value_bytes() {
+        let mut shapes = std::collections::BTreeSet::new();
+        let mut scratch = Scratch::default();
+        for seed in 0..200 {
+            let text = random_model(seed).to_string();
+            let Ok(model) = prepare(serde_json::from_str(&text).unwrap()) else {
+                continue;
+            };
+            for trace in [false, true] {
+                for max_steps in [1_000_000, 1 + seed % 30] {
+                    let budget = Budget {
+                        max_steps,
+                        ..Budget::default()
+                    };
+                    let mut work = Work {
+                        budget: &budget,
+                        deadline: None,
+                        used: 0,
+                        monitored: false,
+                        metrics_enabled: true,
+                    };
+                    let metrics =
+                        match evaluate(&model, &[1.0, 0.25], trace, &mut work, &mut scratch) {
+                            Ok((_, metrics)) => metrics,
+                            Err(e) => e.metrics,
+                        }
+                        .expect("metrics enabled");
+                    let resorted = serde_json::to_string(
+                        &serde_json::from_str::<Value>(metrics.get()).unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(metrics.get(), resorted, "seed {seed}");
+                    let keys: Vec<_> = serde_json::from_str::<Value>(metrics.get())
+                        .unwrap()
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .cloned()
+                        .collect();
+                    shapes.insert((keys.join(","), trace));
+                }
+            }
+        }
+        assert_eq!(shapes.len(), 6, "{shapes:?}");
     }
 
     #[test]

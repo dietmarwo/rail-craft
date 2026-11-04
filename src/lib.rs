@@ -14,13 +14,19 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub type Evaluation = Result<(f64, Value), Failure>;
+/// A score with optional pre-encoded metrics, or a classified failure.
+pub type Evaluation = Result<(f64, Option<Box<RawValue>>), Failure>;
 
 #[derive(Debug, Clone)]
 pub struct Failure {
     status: &'static str,
     detail: String,
-    metrics: Option<Value>,
+    metrics: Option<Box<RawValue>>,
+}
+
+/// Encode metrics once; the raw JSON is spliced into records without a `Value` tree.
+pub fn encode_metrics(metrics: &impl Serialize) -> Box<RawValue> {
+    serde_json::value::to_raw_value(metrics).expect("metrics encode as JSON")
 }
 pub fn invalid(detail: impl Into<String>) -> Failure {
     Failure {
@@ -38,8 +44,8 @@ pub fn infeasible(detail: impl Into<String>) -> Failure {
 }
 
 impl Failure {
-    pub fn with_metrics(mut self, metrics: Value) -> Self {
-        self.metrics = Some(metrics);
+    pub fn with_metrics(mut self, metrics: &impl Serialize) -> Self {
+        self.metrics = Some(encode_metrics(metrics));
         self
     }
 }
@@ -139,12 +145,9 @@ pub struct Work<'a> {
     metrics_enabled: bool,
 }
 impl Work<'_> {
-    pub fn metrics(&self, make: impl FnOnce() -> Value) -> Value {
-        if self.metrics_enabled {
-            make()
-        } else {
-            Value::Null
-        }
+    /// Build metrics only when the caller requested full records.
+    pub fn metrics(&self, make: impl FnOnce() -> Box<RawValue>) -> Option<Box<RawValue>> {
+        self.metrics_enabled.then(make)
     }
 
     #[inline]
@@ -190,7 +193,7 @@ struct Record<'a> {
     status: &'static str,
     steps: u64,
     score: Option<f64>,
-    metrics: Option<Value>,
+    metrics: Option<Box<RawValue>>,
     detail: Option<String>,
 }
 
@@ -341,7 +344,7 @@ impl Prepared {
                 status: "complete",
                 steps,
                 score: Some(score),
-                metrics: Some(metrics),
+                metrics,
                 detail: None,
             },
             Err(e) => Record {
