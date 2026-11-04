@@ -78,3 +78,15 @@ save its timing under `rejected/` and try something else.
   traces.
 - Expected effect: the verifier and its allocations are about 22% of the lean `domain`
   instructions. Expect 1.1x to 1.2x.
+
+### Round 6: per-worker scratch buffers
+
+- Workload: `serial` in matrix mode (`--before-matrix --after-matrix`, 96 example
+  candidates), round 5 against round 6.
+- Change: move every per-candidate buffer of the kernel and verifier (train and resource
+  state, weighted priorities, waiting arrays, ready masks, event heap, interval list, verifier
+  slots and resource groups) into a `domain::Scratch` that each worker, or the inline caller,
+  creates once per batch and resets per candidate. The delay vector is built only when
+  metrics are requested; the score keeps the same summation order.
+- Expected effect: about 20 allocations and frees per candidate disappear; in the small
+  example they are about a third of the instructions. Expect 1.2x to 1.5x.

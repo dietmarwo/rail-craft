@@ -193,32 +193,76 @@ struct ResourceState {
     closures: u32,
 }
 
-pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<'_>) -> Evaluation {
+/// Reusable per-worker buffers for `evaluate`. Every buffer is reset before use, so one
+/// scratch can serve any sequence of candidates and models.
+#[derive(Default)]
+pub struct Scratch {
+    trains: Vec<TrainState>,
+    resources: Vec<ResourceState>,
+    weighted_priority: Vec<f64>,
+    since_of: Vec<u64>,
+    tail_of: Vec<u64>,
+    ready_on: Vec<u128>,
+    events: BinaryHeap<Reverse<u64>>,
+    intervals: Vec<Interval>,
+    verify: VerifyScratch,
+}
+
+/// Reusable buffers for the interval verifier.
+#[derive(Default)]
+struct VerifyScratch {
+    slots: Vec<usize>,
+    starts: Vec<usize>,
+    fill: Vec<usize>,
+    by_resource: Vec<(u64, u64)>,
+}
+
+pub fn evaluate(
+    model: &Model,
+    parameters: &[f64],
+    trace: bool,
+    work: &mut Work<'_>,
+    scratch: &mut Scratch,
+) -> Evaluation {
     let &[priority, age] = parameters else {
         return Err(invalid("expected priority and waiting-time weights"));
     };
     if ![priority, age].iter().all(|v| (0.0..=10.0).contains(v)) {
         return Err(invalid("weights must be in [0,10]"));
     }
-    let mut trains: Vec<_> = model.trains.iter().map(|_| TrainState::default()).collect();
-    let mut resources: Vec<_> = model
-        .resources
-        .iter()
-        .map(|_| ResourceState::default())
-        .collect();
-    let weighted_priority: Vec<_> = model.trains.iter().map(|t| priority * t.priority).collect();
+    let Scratch {
+        trains,
+        resources,
+        weighted_priority,
+        since_of,
+        tail_of,
+        ready_on,
+        events,
+        intervals,
+        verify,
+    } = scratch;
+    let n = model.trains.len();
+    trains.clear();
+    trains.resize_with(n, TrainState::default);
+    resources.clear();
+    resources.resize_with(model.resources.len(), ResourceState::default);
+    weighted_priority.clear();
+    weighted_priority.extend(model.trains.iter().map(|t| priority * t.priority));
     // Dense dispatch state: waiting start and tie-break tail per ready train.
-    let mut since_of = vec![0_u64; model.trains.len()];
-    let mut tail_of = vec![0_u64; model.trains.len()];
+    since_of.clear();
+    since_of.resize(n, 0);
+    tail_of.clear();
+    tail_of.resize(n, 0);
     // Prepared static events are merged with completions and clearance wakes.
     let timeline = model.timeline.as_slice();
     let mut cursor = 0;
-    let mut events = BinaryHeap::with_capacity(model.trains.len() + model.resources.len());
-    let mut intervals = Vec::new();
+    events.clear();
+    intervals.clear();
     let mut completed = 0;
     // Ready trains grouped by the resource of their next leg, plus the resources
     // that have at least one ready train. Both models are limited to 128 entries.
-    let mut ready_on = vec![0_u128; model.resources.len()];
+    ready_on.clear();
+    ready_on.resize(model.resources.len(), 0);
     let mut waiting_resources = 0_u128;
     let mut time = 0;
     let release = |mut interval: Interval,
@@ -242,7 +286,7 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
         (fixed.min(dynamic), fixed <= dynamic)
     };
     loop {
-        let (first, _) = next_event(cursor, &events);
+        let (first, _) = next_event(cursor, events);
         if first == u64::MAX {
             break;
         }
@@ -252,7 +296,7 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
         }
         time = at;
         loop {
-            let (key, from_timeline) = next_event(cursor, &events);
+            let (key, from_timeline) = next_event(cursor, events);
             if key == u64::MAX || key >> 12 != at {
                 break;
             }
@@ -274,9 +318,9 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
                         release(
                             state.held.take().expect("active train"),
                             time,
-                            &mut resources,
-                            &mut intervals,
-                            &mut events,
+                            resources,
+                            intervals,
+                            events,
                         );
                         state.arrival = Some(time);
                         completed += 1;
@@ -337,7 +381,7 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
             }
             let state = &mut trains[i];
             if let Some(previous) = state.held.take() {
-                release(previous, time, &mut resources, &mut intervals, &mut events);
+                release(previous, time, resources, intervals, events);
             }
             let leg = &model.trains[i].route[state.next];
             let end = time + leg.duration;
@@ -372,32 +416,47 @@ pub fn evaluate(model: &Model, parameters: &[f64], trace: bool, work: &mut Work<
             json!({"completed":completed,"time":time,"closed_intervals":trace.then_some(&intervals),"active":trace.then_some(active)}),
         ));
     }
-    validate_trace(model, &intervals).map_err(invalid)?;
-    let delay: Vec<_> = trains
+    validate_with(model, intervals, verify).map_err(invalid)?;
+    let delay =
+        |(s, t): (&TrainState, &Train)| s.arrival.expect("completed").saturating_sub(t.planned);
+    // Same per-train terms, added in the same order, as summing a delay vector.
+    let score: f64 = trains
         .iter()
         .zip(&model.trains)
-        .map(|(s, t)| s.arrival.expect("completed").saturating_sub(t.planned))
-        .collect();
-    let score: f64 = delay
-        .iter()
-        .zip(&model.trains)
-        .map(|(&d, t)| d as f64 * (1.0 + t.priority))
+        .map(|pair| delay(pair) as f64 * (1.0 + pair.1.priority))
         .sum();
     Ok((
         score,
         work.metrics(|| {
+            let delay: Vec<_> = trains.iter().zip(&model.trains).map(delay).collect();
             json!({"completed":completed,"max_delay":delay.iter().max(),"delays":delay,
-        "intervals":trace.then_some(intervals)})
+        "intervals":trace.then_some(&*intervals)})
         }),
     ))
 }
 
 pub fn validate_trace(model: &Model, intervals: &[Interval]) -> Result<(), String> {
+    validate_with(model, intervals, &mut VerifyScratch::default())
+}
+
+fn validate_with(
+    model: &Model,
+    intervals: &[Interval],
+    scratch: &mut VerifyScratch,
+) -> Result<(), String> {
     const EMPTY: usize = usize::MAX;
+    let VerifyScratch {
+        slots,
+        starts,
+        fill,
+        by_resource,
+    } = scratch;
     let legs = model.leg_offset[model.trains.len()];
     // Movement index per (train, leg) slot, and movement counts per resource.
-    let mut slots = vec![EMPTY; legs];
-    let mut starts = vec![0_usize; model.resources.len() + 1];
+    slots.clear();
+    slots.resize(legs, EMPTY);
+    starts.clear();
+    starts.resize(model.resources.len() + 1, 0);
     let mut repeated = false;
     for (k, row) in intervals.iter().enumerate() {
         let Some(train) = model.trains.get(row.train) else {
@@ -445,8 +504,10 @@ pub fn validate_trace(model: &Model, intervals: &[Interval]) -> Result<(), Strin
     for r in 0..model.resources.len() {
         starts[r + 1] += starts[r];
     }
-    let mut fill = starts.clone();
-    let mut by_resource = vec![(0_u64, 0_u64); intervals.len()];
+    fill.clear();
+    fill.extend_from_slice(starts);
+    by_resource.clear();
+    by_resource.resize(intervals.len(), (0, 0));
     for row in intervals {
         by_resource[fill[row.resource]] = (row.entry, row.exit);
         fill[row.resource] += 1;
@@ -761,7 +822,7 @@ mod tests {
     }
 
     fn run(
-        kernel: fn(&Model, &[f64], bool, &mut Work<'_>) -> Evaluation,
+        mut kernel: impl FnMut(&Model, &[f64], bool, &mut Work<'_>) -> Evaluation,
         model: &Model,
         parameters: &[f64],
         trace: bool,
@@ -836,13 +897,20 @@ mod tests {
     #[test]
     fn verifier_matches_the_reference_on_corrupted_traces() {
         let mut verdicts = std::collections::BTreeMap::new();
+        let mut shared = VerifyScratch::default();
         for seed in 0..300 {
             let text = random_model(seed).to_string();
             let Ok(model) = prepare(serde_json::from_str(&text).unwrap()) else {
                 continue;
             };
             let budget = Budget::default();
-            let row = run(evaluate, &model, &[1.0, 0.5], true, &budget);
+            let row = run(
+                |m, p, t, w| evaluate(m, p, t, w, &mut Scratch::default()),
+                &model,
+                &[1.0, 0.5],
+                true,
+                &budget,
+            );
             if row["status"] != "complete" {
                 continue;
             }
@@ -885,6 +953,11 @@ mod tests {
                 }
                 let expected = reference_validate(&model, &rows);
                 assert_eq!(validate_trace(&model, &rows), expected, "seed {seed}");
+                assert_eq!(
+                    validate_with(&model, &rows, &mut shared),
+                    expected,
+                    "seed {seed}"
+                );
                 *verdicts
                     .entry(expected.err().unwrap_or_default())
                     .or_insert(0) += 1;
@@ -905,6 +978,8 @@ mod tests {
             [-0.0, -0.0],
         ];
         let mut outcomes = std::collections::BTreeMap::new();
+        // One scratch serves every model and candidate, as a worker's scratch does.
+        let mut scratch = Scratch::default();
         for seed in 0..400 {
             let text = random_model(seed).to_string();
             let Ok(model) = prepare(serde_json::from_str(&text).unwrap()) else {
@@ -918,7 +993,13 @@ mod tests {
                         ..Budget::default()
                     };
                     let expected = run(reference, &model, parameters, trace, &budget);
-                    let actual = run(evaluate, &model, parameters, trace, &budget);
+                    let actual = run(
+                        |m, p, t, w| evaluate(m, p, t, w, &mut scratch),
+                        &model,
+                        parameters,
+                        trace,
+                        &budget,
+                    );
                     assert_eq!(actual, expected, "seed {seed} weights {parameters:?}");
                     *outcomes
                         .entry(format!("{}:{}", expected["status"], expected["detail"]))

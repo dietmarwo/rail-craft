@@ -96,26 +96,29 @@ pub struct MatrixScore {
 }
 
 /// Evaluate `count` independent items inline or on scoped workers, in input order.
+/// The inline caller and each worker reuse one domain scratch for all of their items.
 fn dispatch<T: Send + Sync>(
     count: usize,
     workers: usize,
-    evaluate: impl Fn(usize) -> T + Sync,
+    evaluate: impl Fn(&mut domain::Scratch, usize) -> T + Sync,
 ) -> Vec<T> {
     if workers == 1 || count == 1 {
-        return (0..count).map(evaluate).collect();
+        let mut scratch = domain::Scratch::default();
+        return (0..count).map(|i| evaluate(&mut scratch, i)).collect();
     }
     let next = AtomicUsize::new(0);
     let slots: Vec<_> = (0..count).map(|_| OnceLock::new()).collect();
     std::thread::scope(|scope| {
         for _ in 0..workers.min(count) {
             scope.spawn(|| {
+                let mut scratch = domain::Scratch::default();
                 loop {
                     let index = next.fetch_add(1, Ordering::Relaxed);
                     if index >= count {
                         break;
                     }
                     assert!(
-                        slots[index].set(evaluate(index)).is_ok(),
+                        slots[index].set(evaluate(&mut scratch, index)).is_ok(),
                         "duplicate work index"
                     );
                 }
@@ -271,9 +274,9 @@ impl Prepared {
             return Err("invalid budget or batch size".into());
         }
         let deadline = budget.deadline();
-        Ok(dispatch(rows, budget.workers, |row| {
+        Ok(dispatch(rows, budget.workers, |scratch, row| {
             let values = &parameters[row * dimension..(row + 1) * dimension];
-            let (result, steps) = self.outcome(values, false, &budget, deadline, false);
+            let (result, steps) = self.outcome(scratch, values, false, &budget, deadline, false);
             match result {
                 Ok((score, _)) => MatrixScore {
                     status: "complete",
@@ -291,6 +294,7 @@ impl Prepared {
 
     fn outcome(
         &self,
+        scratch: &mut domain::Scratch,
         parameters: &[f64],
         trace: bool,
         budget: &Budget,
@@ -304,7 +308,7 @@ impl Prepared {
             metrics_enabled,
             monitored: deadline.is_some() || budget.cancel_file.is_some(),
         };
-        let result = domain::evaluate(&self.model, parameters, trace, &mut work);
+        let result = domain::evaluate(&self.model, parameters, trace, &mut work, scratch);
         let result = result.and_then(|(score, metrics)| {
             if score.is_finite() {
                 Ok((score, metrics))
@@ -317,13 +321,20 @@ impl Prepared {
 
     fn record<'a>(
         &self,
+        scratch: &mut domain::Scratch,
         c: &'a Candidate,
         budget: &Budget,
         deadline: Option<Instant>,
         metrics_enabled: bool,
     ) -> Record<'a> {
-        let (result, steps) =
-            self.outcome(&c.parameters, c.trace, budget, deadline, metrics_enabled);
+        let (result, steps) = self.outcome(
+            scratch,
+            &c.parameters,
+            c.trace,
+            budget,
+            deadline,
+            metrics_enabled,
+        );
         match result {
             Ok((score, metrics)) => Record {
                 id: &c.id,
@@ -366,8 +377,14 @@ impl Prepared {
             return Err("at most 16 traced candidates per batch".into());
         }
         let deadline = budget.deadline();
-        let records = dispatch(candidates.len(), budget.workers, |index| {
-            self.record(&candidates[index], &budget, deadline, metrics_enabled)
+        let records = dispatch(candidates.len(), budget.workers, |scratch, index| {
+            self.record(
+                scratch,
+                &candidates[index],
+                &budget,
+                deadline,
+                metrics_enabled,
+            )
         });
         Ok(Batch {
             model_sha256: &self.model_sha256,
