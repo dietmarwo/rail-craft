@@ -124,3 +124,14 @@ save its timing under `rejected/` and try something else.
   `time_f64 - since_f64` is exact and equals the former `(time - since) as f64`.
 - Expected effect: about 17% of lean `domain` instructions are bounds checks in the scan,
   plus a conversion per contender. Expect 1.1x to 1.3x.
+
+### Round 10: calling thread joins the worker set
+
+- Workload: `parallel` (96 full records, 4 workers on this 2-vCPU host), round 9 against
+  round 10.
+- Change: a multi-worker batch spawns `min(workers, candidates) - 1` scoped threads and the
+  calling thread runs the same claim loop instead of only waiting, so the number of
+  concurrent evaluators is unchanged and one thread start and join disappears. The caller
+  starts evaluating while the spawned threads start.
+- Expected effect: thread start and join dominate this workload (the 4-worker batch takes
+  about 2.4x the serial time). Expect 1.1x to 1.3x.

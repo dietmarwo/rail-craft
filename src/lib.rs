@@ -146,23 +146,26 @@ fn dispatch<T: Send + Sync>(
     }
     let next = AtomicUsize::new(0);
     let slots: Vec<_> = (0..count).map(|_| OnceLock::new()).collect();
-    std::thread::scope(|scope| {
-        for _ in 0..workers.min(count) {
-            scope.spawn(|| {
-                let mut scratch = pool.take();
-                loop {
-                    let index = next.fetch_add(1, Ordering::Relaxed);
-                    if index >= count {
-                        break;
-                    }
-                    assert!(
-                        slots[index].set(evaluate(&mut scratch, index)).is_ok(),
-                        "duplicate work index"
-                    );
-                }
-                pool.give(scratch);
-            });
+    let work = || {
+        let mut scratch = pool.take();
+        loop {
+            let index = next.fetch_add(1, Ordering::Relaxed);
+            if index >= count {
+                break;
+            }
+            assert!(
+                slots[index].set(evaluate(&mut scratch, index)).is_ok(),
+                "duplicate work index"
+            );
         }
+        pool.give(scratch);
+    };
+    // The calling thread is one of the `min(workers, count)` concurrent evaluators.
+    std::thread::scope(|scope| {
+        for _ in 1..workers.min(count) {
+            scope.spawn(work);
+        }
+        work();
     });
     slots
         .into_iter()
@@ -743,6 +746,27 @@ mod tests {
             pool.give(domain::Scratch::default());
         }
         assert_eq!(pool.len(), ScratchPool::LIMIT);
+    }
+
+    #[test]
+    fn dispatch_keeps_order_and_bounds_concurrent_evaluators() {
+        let pool = ScratchPool::default();
+        for (count, workers) in [(1, 4), (2, 4), (5, 2), (97, 4), (64, 64), (3, 1)] {
+            let calls = AtomicUsize::new(0);
+            let threads = Mutex::new(HashSet::new());
+            let rows = dispatch(&pool, count, workers, |_, index| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                threads.lock().unwrap().insert(std::thread::current().id());
+                index * 3
+            });
+            assert_eq!(rows, (0..count).map(|i| i * 3).collect::<Vec<_>>());
+            assert_eq!(calls.load(Ordering::Relaxed), count);
+            let used = threads.lock().unwrap().len();
+            assert!(
+                (1..=workers.min(count)).contains(&used),
+                "{count} {workers} {used}"
+            );
+        }
     }
 
     #[test]
