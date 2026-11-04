@@ -61,3 +61,20 @@ save its timing under `rejected/` and try something else.
   per-candidate heap clone and the logarithmic pops of 700 static events.
 - Expected effect: heap work is about 19% of `domain2` instructions after round 3, plus the
   clone. Expect 1.1x to 1.25x.
+
+### Round 5: flat interval verifier
+
+- Workload: lean `domain` (`--before-scores --after-scores`, 48 candidates, 110 trains),
+  round 4 against round 5.
+- Change: `validate_trace` keeps its three phases, checks and messages. Instead of one vector
+  per train and per resource, it places each movement into a prepared per-train leg slot
+  (prefix offsets computed at preparation) and groups movements by resource with a stable
+  counting pass, sorting a group by entry only when it is not already ordered. Per call it
+  allocates three buffers instead of trains + resources + 2 vectors.
+- Equivalence argument: with no repeated (train, leg) slot, the row count equals the total
+  leg count exactly when every train has all its legs, which is the per-train sort condition;
+  rows sharing a resource and entry always fail the clearance check in either order. A
+  randomized test compares accept/reject and message with the 0.2.0 verifier on corrupted
+  traces.
+- Expected effect: the verifier and its allocations are about 22% of the lean `domain`
+  instructions. Expect 1.1x to 1.2x.
