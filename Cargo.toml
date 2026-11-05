@@ -3,8 +3,11 @@ name = "rail-craft"
 version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
-description = "Bounded rail-craft research evaluator"
+description = "Rail dispatch evaluator: dispatch policies on synthetic fixed-route corridors with blocking, clearance and entry closures"
 license = "MIT"
+repository = "https://github.com/dietmarwo/rail-craft"
+keywords = ["railway", "dispatching", "scheduling", "simulation", "optimization"]
+categories = ["simulation", "science"]
 # Source archives carry the code, docs, examples, models, validation scripts and the small
 # validation evidence; release packages, patches and timing evidence stay out.
 include = [
