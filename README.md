@@ -1,3 +1,5 @@
+![rail-craft — dispatch policies and simulation](docs/images/banner.png)
+
 # rail-craft 0.3.0
 
 A bounded research evaluator for dispatch policies on synthetic fixed-route rail
