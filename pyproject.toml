@@ -6,7 +6,11 @@ build-backend = "maturin"
 name = "rail-craft"
 version = "0.3.0"
 requires-python = ">=3.10"
-description = "Prepared rail-craft research evaluations"
+description = "Python API for a Rust rail dispatch evaluator: dispatch policies on synthetic fixed-route corridors with blocking, clearance and entry closures"
+keywords = ["railway", "train dispatching", "scheduling", "discrete-event simulation", "operations research", "optimization", "Rust"]
+
+[project.urls]
+Repository = "https://github.com/dietmarwo/rail-craft"
 
 [tool.maturin]
 module-name = "rail_craft._native"
